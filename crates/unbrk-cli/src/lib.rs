@@ -281,6 +281,9 @@ fn run_recover(
                 message: error.to_string(),
             },
         );
+        if !plan.args.json {
+            write_event_trace(stderr, &events[..events.len().saturating_sub(1)])?;
+        }
     }
 
     if let Some(path) = plan.args.log_file.as_deref() {
@@ -608,30 +611,57 @@ fn wait_for_uboot_prompt(
 
 fn append_events(events: &mut Vec<Event>, appended: Vec<Event>) {
     for event in appended {
-        push_event(events, event.payload);
+        push_existing_event(events, event);
     }
 }
 
 fn push_event(events: &mut Vec<Event>, payload: EventPayload) {
-    let sequence = u64::try_from(events.len())
-        .unwrap_or(u64::MAX.saturating_sub(1))
-        .saturating_add(1);
+    let sequence = next_sequence(events);
     events.push(
         Event::now(sequence, payload.clone()).unwrap_or_else(|_| Event::new(sequence, 0, payload)),
     );
 }
 
+fn push_existing_event(events: &mut Vec<Event>, event: Event) {
+    events.push(Event::new(
+        next_sequence(events),
+        event.timestamp_unix_ms,
+        event.payload,
+    ));
+}
+
+fn next_sequence(events: &[Event]) -> u64 {
+    u64::try_from(events.len())
+        .unwrap_or(u64::MAX.saturating_sub(1))
+        .saturating_add(1)
+}
+
 fn write_events(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
     for event in events {
-        serde_json::to_writer(&mut *writer, event).map_err(|error| {
-            RunError::Serial(io::Error::other(format!(
-                "failed to serialize JSON event stream: {error}",
-            )))
-        })?;
+        serde_json::to_writer(&mut *writer, event).map_err(|error| map_json_event_error(&error))?;
         writeln!(writer).map_err(RunError::Serial)?;
     }
 
     Ok(())
+}
+
+fn map_json_event_error(error: &serde_json::Error) -> RunError {
+    if error.is_io() {
+        RunError::Serial(io::Error::other(format!(
+            "failed to write JSON event stream: {error}",
+        )))
+    } else {
+        RunError::Protocol(format!("failed to serialize JSON event stream: {error}"))
+    }
+}
+
+fn flush_event_writer(writer: &mut dyn Write) -> Result<(), RunError> {
+    writer.flush().map_err(|error| {
+        RunError::Serial(io::Error::new(
+            error.kind(),
+            format!("failed to flush event stream: {error}"),
+        ))
+    })
 }
 
 fn write_events_to_path(path: &Path, events: &[Event]) -> Result<(), RunError> {
@@ -642,7 +672,15 @@ fn write_events_to_path(path: &Path, events: &[Event]) -> Result<(), RunError> {
         )))
     })?;
     let mut writer = BufWriter::new(file);
-    write_events(&mut writer, events)
+    write_events(&mut writer, events)?;
+    flush_event_writer(&mut writer)
+}
+
+fn write_event_trace(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
+    for event in events {
+        writeln!(writer, "{event}").map_err(RunError::Serial)?;
+    }
+    Ok(())
 }
 
 fn write_recover_summary(
@@ -1009,10 +1047,13 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 mod tests {
     use super::{
         CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
-        TerminalStatus, build_flash_plan, parse_command, target_profile, try_run,
-        wait_for_uboot_prompt,
+        TerminalStatus, append_events, build_flash_plan, flush_event_writer, map_json_event_error,
+        parse_command, target_profile, try_run, wait_for_uboot_prompt, write_event_trace,
+        write_events,
     };
+    use std::io::{self, Write};
     use std::time::Duration;
+    use unbrk_core::event::{Event, EventPayload, RecoveryStage};
     use unbrk_core::target::{AN7581, BlockCount, BlockOffset, PromptPattern};
     use unbrk_core::{MockStep, MockTransport};
 
@@ -1041,6 +1082,10 @@ mod tests {
         try_run(args, terminal_status, &mut stdout, &mut stderr).unwrap();
         assert!(stderr.is_empty());
         String::from_utf8(stdout).unwrap()
+    }
+
+    fn fixture_event(sequence: u64, timestamp_unix_ms: u64, payload: EventPayload) -> Event {
+        Event::new(sequence, timestamp_unix_ms, payload)
     }
 
     #[test]
@@ -1501,5 +1546,129 @@ mod tests {
 
         assert_eq!(prompt, "VALYRIAN>");
         transport.assert_finished();
+    }
+
+    #[test]
+    fn append_events_preserves_core_timestamps() {
+        let mut events = vec![fixture_event(
+            1,
+            100,
+            EventPayload::PortOpened {
+                port: String::from(PORT),
+                baud: 115_200,
+            },
+        )];
+
+        append_events(
+            &mut events,
+            vec![fixture_event(
+                9,
+                7_777,
+                EventPayload::PromptSeen {
+                    stage: RecoveryStage::PreloaderPrompt,
+                    prompt: String::from("Press x"),
+                },
+            )],
+        );
+
+        assert_eq!(events[1].sequence, 2);
+        assert_eq!(events[1].timestamp_unix_ms, 7_777);
+    }
+
+    #[test]
+    fn json_write_errors_stay_serial_failures() {
+        let events = [fixture_event(
+            1,
+            100,
+            EventPayload::PortOpened {
+                port: String::from(PORT),
+                baud: 115_200,
+            },
+        )];
+        let mut writer = BrokenWriter;
+
+        let error = write_events(&mut writer, &events).unwrap_err();
+
+        assert!(matches!(error, RunError::Serial(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to write JSON event stream")
+        );
+    }
+
+    #[test]
+    fn non_io_json_errors_map_to_protocol_failures() {
+        let error = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let mapped = map_json_event_error(&error);
+
+        assert!(matches!(mapped, RunError::Protocol(_)));
+        assert!(
+            mapped
+                .to_string()
+                .contains("failed to serialize JSON event stream")
+        );
+    }
+
+    #[test]
+    fn flush_event_writer_reports_flush_failures() {
+        let mut writer = FlushFailWriter;
+        let error = flush_event_writer(&mut writer).unwrap_err();
+
+        assert!(matches!(error, RunError::Serial(_)));
+        assert!(error.to_string().contains("failed to flush event stream"));
+    }
+
+    #[test]
+    fn write_event_trace_renders_pre_failure_progress() {
+        let events = [
+            fixture_event(
+                1,
+                100,
+                EventPayload::PortOpened {
+                    port: String::from(PORT),
+                    baud: 115_200,
+                },
+            ),
+            fixture_event(
+                2,
+                200,
+                EventPayload::PromptSeen {
+                    stage: RecoveryStage::PreloaderPrompt,
+                    prompt: String::from("Press x"),
+                },
+            ),
+        ];
+        let mut output = Vec::new();
+
+        write_event_trace(&mut output, &events).unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+
+        assert!(rendered.contains("opened serial port"));
+        assert!(rendered.contains("prompt seen"));
+    }
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("broken sink"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FlushFailWriter;
+
+    impl Write for FlushFailWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("cannot flush"))
+        }
     }
 }
