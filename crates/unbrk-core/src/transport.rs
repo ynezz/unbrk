@@ -1,7 +1,50 @@
 //! Blocking serial transport abstractions.
 
-use std::io;
+use serialport::{DataBits, FlowControl, Parity, StopBits};
+use std::io::{self, Read, Write};
 use std::time::Duration;
+
+/// Default baud rate for the documented Valyrian recovery flow.
+pub const DEFAULT_BAUD_RATE: u32 = 115_200;
+
+/// Real serial transport backed by the `serialport` crate.
+pub struct SerialTransport {
+    path: String,
+    port: serialport::SerialPort,
+}
+
+impl SerialTransport {
+    /// Opens a serial port with explicit line settings.
+    ///
+    /// The recovery flow uses 8N1 with no flow control on all supported hosts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the device cannot be opened or configured.
+    pub fn open(path: impl Into<String>, baud_rate: u32, timeout: Duration) -> io::Result<Self> {
+        let path = path.into();
+        let port = serial_port_builder(path.as_str(), baud_rate, timeout)
+            .open(path.as_str())
+            .map_err(|error| map_serialport_error(path.as_str(), &error))?;
+
+        Ok(Self { path, port })
+    }
+
+    /// Opens a serial port using the default Valyrian baud rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the device cannot be opened or configured.
+    pub fn open_default(path: impl Into<String>, timeout: Duration) -> io::Result<Self> {
+        Self::open(path, DEFAULT_BAUD_RATE, timeout)
+    }
+
+    /// Returns the configured serial-port path.
+    #[must_use]
+    pub const fn path(&self) -> &str {
+        self.path.as_str()
+    }
+}
 
 /// Abstracts the raw byte transport used by the recovery flow.
 ///
@@ -70,9 +113,71 @@ pub trait Transport {
     }
 }
 
+impl Transport for SerialTransport {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.port.read(buffer)
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.port.write_all(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.port.flush()
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.port
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| map_serialport_error(self.path.as_str(), &error))?;
+        self.port
+            .set_write_timeout(Some(timeout))
+            .map_err(|error| map_serialport_error(self.path.as_str(), &error))
+    }
+}
+
+fn serial_port_builder(
+    _path: &str,
+    baud_rate: u32,
+    timeout: Duration,
+) -> serialport::SerialPortBuilder {
+    serialport::SerialPort::builder()
+        .baud_rate(baud_rate)
+        .data_bits(DataBits::Eight)
+        .flow_control(FlowControl::None)
+        .parity(Parity::None)
+        .stop_bits(StopBits::One)
+        .read_timeout(Some(timeout))
+        .write_timeout(Some(timeout))
+}
+
+fn map_serialport_error(path: &str, error: &serialport::Error) -> io::Error {
+    match error.kind() {
+        serialport::ErrorKind::NoDevice => io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("serial port {path} is unavailable: {}", error.description),
+        ),
+        serialport::ErrorKind::InvalidInput => io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "invalid serial-port settings for {path}: {}",
+                error.description
+            ),
+        ),
+        serialport::ErrorKind::Unknown => {
+            io::Error::other(format!("serial port {path} failed: {}", error.description))
+        }
+        serialport::ErrorKind::Io(kind) => io::Error::new(
+            kind,
+            format!("serial port {path} failed: {}", error.description),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Transport;
+    use super::{DEFAULT_BAUD_RATE, Transport, map_serialport_error, serial_port_builder};
+    use serialport::{DataBits, FlowControl, Parity, StopBits};
     use std::io;
     use std::time::Duration;
 
@@ -152,5 +257,56 @@ mod tests {
         transport.set_timeout(timeout).unwrap();
 
         assert_eq!(transport.timeout, timeout);
+    }
+
+    #[test]
+    fn serial_port_builder_uses_documented_line_settings() {
+        let timeout = Duration::from_millis(250);
+        let builder = serial_port_builder("/dev/ttyUSB0", DEFAULT_BAUD_RATE, timeout);
+        let expected = serialport::SerialPort::builder()
+            .baud_rate(DEFAULT_BAUD_RATE)
+            .data_bits(DataBits::Eight)
+            .flow_control(FlowControl::None)
+            .parity(Parity::None)
+            .stop_bits(StopBits::One)
+            .read_timeout(Some(timeout))
+            .write_timeout(Some(timeout));
+
+        assert_eq!(builder, expected);
+    }
+
+    #[test]
+    fn no_device_maps_to_not_found() {
+        let error =
+            serialport::Error::new(serialport::ErrorKind::NoDevice, "port is already in use");
+        let io_error = map_serialport_error("/dev/ttyUSB0", &error);
+
+        assert_eq!(io_error.kind(), io::ErrorKind::NotFound);
+        assert!(io_error.to_string().contains("unavailable"));
+    }
+
+    #[test]
+    fn invalid_input_maps_to_invalid_input() {
+        let error = serialport::Error::new(serialport::ErrorKind::InvalidInput, "bad baud");
+        let io_error = map_serialport_error("/dev/ttyUSB0", &error);
+
+        assert_eq!(io_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            io_error
+                .to_string()
+                .contains("invalid serial-port settings")
+        );
+    }
+
+    #[test]
+    fn io_error_preserves_the_underlying_io_kind() {
+        let error = serialport::Error::new(
+            serialport::ErrorKind::Io(io::ErrorKind::PermissionDenied),
+            "permission denied",
+        );
+        let io_error = map_serialport_error("/dev/ttyUSB0", &error);
+
+        assert_eq!(io_error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(io_error.to_string().contains("permission denied"));
     }
 }

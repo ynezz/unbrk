@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 regex.workspace = true
 serde.workspace = true
+serialport.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
