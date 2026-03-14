@@ -24,6 +24,25 @@ panic = "abort"     # Smaller binary, no unwinding overhead
 strip = true        # Remove debug symbols
 ```
 
+## Releases
+
+This project uses [release-plz](https://release-plz.dev/) for automated
+releases. See [`docs/releasing.md`](docs/releasing.md) for the full
+workflow documentation.
+
+**Key points for agents:**
+
+- **Do NOT create releases manually.** release-plz handles versioning,
+  changelogs, git tags, and GitHub Releases automatically.
+- **Do NOT edit `CHANGELOG.md` by hand.** release-plz generates it from
+  conventional commit messages.
+- **Do NOT bump versions in `Cargo.toml`.** release-plz release PRs
+  handle this.
+- **Use conventional commits** — release-plz parses them to determine
+  version bumps and changelog entries (e.g., `feat:`, `fix:`, `chore:`).
+- Only `unbrk-cli` is released. `unbrk-core` and `xtask` are excluded
+  from release management (`release = false`).
+
 ## Backwards Compatibility
 
 We do not care about backwards compatibility—we're in early development with no users. We want to do things the **RIGHT** way with **NO TECH DEBT**.
