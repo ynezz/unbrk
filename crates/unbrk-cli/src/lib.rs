@@ -5,6 +5,10 @@ use clap::{
 use clap_complete::Shell;
 use clap_complete::generate;
 use clap_mangen::Man;
+use crossterm::event::{
+    self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use is_terminal::IsTerminal;
 use regex::Regex;
 use serialport::{SerialPortInfo, SerialPortType, available_ports};
@@ -45,6 +49,7 @@ Exit codes:
   6  verification mismatch
   7  bad input
   8  user abort";
+const CONSOLE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[must_use]
 pub fn run() -> ExitCode {
@@ -266,7 +271,17 @@ fn run_recover(
         },
     );
 
-    let execution = execute_recover(plan, target, &mut transport, &mut events);
+    let mut execution = execute_recover(plan, target, &mut transport, &mut events);
+    let mut console_handoff_completed = false;
+    if matches!(execution, Ok(RecoverOutcome::Recovered)) && plan.console_handoff_allowed {
+        match handoff_console(&mut transport, stdout) {
+            Ok(()) => {
+                console_handoff_completed = true;
+            }
+            Err(error) => execution = Err(error),
+        }
+    }
+
     if let Err(error) = &execution {
         push_event(
             &mut events,
@@ -287,7 +302,13 @@ fn run_recover(
     if plan.args.json {
         write_events(stdout, &events)?;
     } else if let Ok(outcome) = &execution {
-        write_recover_summary(stdout, plan, port.as_str(), outcome)?;
+        write_recover_summary(
+            stdout,
+            plan,
+            port.as_str(),
+            outcome,
+            console_handoff_completed,
+        )?;
     }
 
     execution.map(|_| ())
@@ -448,6 +469,154 @@ fn describe_port_type(port_type: &SerialPortType) -> String {
         SerialPortType::PciPort => String::from("PCI serial"),
         SerialPortType::BluetoothPort => String::from("Bluetooth serial"),
         SerialPortType::Unknown => String::from("Unknown transport"),
+    }
+}
+
+fn handoff_console(transport: &mut impl Transport, stdout: &mut dyn Write) -> Result<(), RunError> {
+    writeln!(
+        stdout,
+        "Entering interactive console handoff. Press Ctrl-C or Ctrl-D to exit."
+    )
+    .map_err(RunError::Serial)?;
+    stdout.flush().map_err(RunError::Serial)?;
+
+    let _raw_mode = RawModeGuard::enable()?;
+    transport
+        .set_timeout(CONSOLE_HANDOFF_POLL_INTERVAL)
+        .map_err(|source| serial_run_error("setting the console handoff timeout", &source))?;
+    relay_console_handoff(transport, stdout)?;
+
+    writeln!(stdout, "\r\nLeft interactive console handoff.").map_err(RunError::Serial)?;
+    stdout.flush().map_err(RunError::Serial)
+}
+
+fn relay_console_handoff(
+    transport: &mut impl Transport,
+    stdout: &mut dyn Write,
+) -> Result<(), RunError> {
+    let mut serial_buffer = [0_u8; 256];
+
+    loop {
+        if event::poll(CONSOLE_HANDOFF_POLL_INTERVAL)
+            .map_err(|source| terminal_run_error("polling terminal input", &source))?
+        {
+            match event::read()
+                .map_err(|source| terminal_run_error("reading terminal input", &source))?
+            {
+                TerminalEvent::Key(event) => match console_action_for_key_event(event) {
+                    ConsoleAction::Ignore => {}
+                    ConsoleAction::Exit => break,
+                    ConsoleAction::Send(bytes) => {
+                        transport.write(&bytes).map_err(|source| {
+                            serial_run_error("writing console input to the serial port", &source)
+                        })?;
+                        transport.flush().map_err(|source| {
+                            serial_run_error("flushing console input to the serial port", &source)
+                        })?;
+                    }
+                },
+                TerminalEvent::Paste(contents) if !contents.is_empty() => {
+                    transport.write(contents.as_bytes()).map_err(|source| {
+                        serial_run_error("writing pasted console input to the serial port", &source)
+                    })?;
+                    transport.flush().map_err(|source| {
+                        serial_run_error(
+                            "flushing pasted console input to the serial port",
+                            &source,
+                        )
+                    })?;
+                }
+                _ => {}
+            }
+        }
+
+        match transport.read(&mut serial_buffer) {
+            Ok(0) => break,
+            Ok(read_len) => {
+                stdout
+                    .write_all(&serial_buffer[..read_len])
+                    .map_err(RunError::Serial)?;
+                stdout.flush().map_err(RunError::Serial)?;
+            }
+            Err(source) if source.kind() == io::ErrorKind::TimedOut => {}
+            Err(source) => {
+                return Err(serial_run_error(
+                    "reading console output from the serial port",
+                    &source,
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn console_action_for_key_event(event: KeyEvent) -> ConsoleAction {
+    if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return ConsoleAction::Ignore;
+    }
+
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        return match event.code {
+            KeyCode::Char('c' | 'C' | 'd' | 'D') => ConsoleAction::Exit,
+            KeyCode::Char(character) if character.is_ascii() => {
+                ConsoleAction::Send(vec![character.to_ascii_lowercase() as u8 & 0x1f])
+            }
+            _ => ConsoleAction::Ignore,
+        };
+    }
+
+    match event.code {
+        KeyCode::Backspace => ConsoleAction::Send(vec![0x08]),
+        KeyCode::Enter => ConsoleAction::Send(vec![b'\r']),
+        KeyCode::Tab => ConsoleAction::Send(vec![b'\t']),
+        KeyCode::Esc => ConsoleAction::Send(vec![0x1b]),
+        KeyCode::Char(character) => ConsoleAction::Send(character.to_string().into_bytes()),
+        KeyCode::Up => ConsoleAction::Send(b"\x1b[A".to_vec()),
+        KeyCode::Down => ConsoleAction::Send(b"\x1b[B".to_vec()),
+        KeyCode::Right => ConsoleAction::Send(b"\x1b[C".to_vec()),
+        KeyCode::Left => ConsoleAction::Send(b"\x1b[D".to_vec()),
+        KeyCode::Home => ConsoleAction::Send(b"\x1b[H".to_vec()),
+        KeyCode::End => ConsoleAction::Send(b"\x1b[F".to_vec()),
+        KeyCode::Delete => ConsoleAction::Send(b"\x1b[3~".to_vec()),
+        _ => ConsoleAction::Ignore,
+    }
+}
+
+fn serial_run_error(operation: &'static str, source: &io::Error) -> RunError {
+    RunError::Serial(io::Error::new(
+        source.kind(),
+        format!("serial I/O failed while {operation}: {source}"),
+    ))
+}
+
+fn terminal_run_error(operation: &'static str, source: &io::Error) -> RunError {
+    RunError::Serial(io::Error::new(
+        source.kind(),
+        format!("terminal I/O failed while {operation}: {source}"),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConsoleAction {
+    Ignore,
+    Exit,
+    Send(Vec<u8>),
+}
+
+#[derive(Debug)]
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> Result<Self, RunError> {
+        enable_raw_mode().map_err(|source| terminal_run_error("enabling raw mode", &source))?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ignored = disable_raw_mode();
     }
 }
 
@@ -848,6 +1017,7 @@ fn write_recover_summary(
     plan: &RecoverPlan,
     port: &str,
     outcome: &RecoverOutcome,
+    console_handoff_completed: bool,
 ) -> Result<(), RunError> {
     writeln!(
         stdout,
@@ -860,14 +1030,15 @@ fn write_recover_summary(
 
     match outcome {
         RecoverOutcome::Recovered => {
-            writeln!(stdout, "stopped at the RAM-resident U-Boot prompt.")
-                .map_err(RunError::Serial)?;
-            if plan.console_handoff_allowed {
+            if console_handoff_completed {
                 writeln!(
                     stdout,
-                    "interactive console handoff is not implemented yet; staying at the stop point."
+                    "interactive console handoff ended at the RAM-resident U-Boot prompt."
                 )
                 .map_err(RunError::Serial)?;
+            } else {
+                writeln!(stdout, "stopped at the RAM-resident U-Boot prompt.")
+                    .map_err(RunError::Serial)?;
             }
         }
         RecoverOutcome::FlashedAfterRecovery { reset_evidence } => {
@@ -1209,12 +1380,14 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
-        TerminalStatus, append_events, build_flash_plan, flush_event_writer,
-        is_plausible_recovery_port, map_json_event_error, normalize_port_name, parse_command,
-        render_port_line, select_recover_port, target_profile, try_run, wait_for_uboot_prompt,
-        write_event_trace, write_events, xmodem_config,
+        CliExitCode, CommandPlan, ConsoleAction, ProgressMode, RecoverOutcome, RecoverPlan,
+        ResolvedProgressMode, RunError, TerminalStatus, append_events, build_flash_plan,
+        console_action_for_key_event, flush_event_writer, is_plausible_recovery_port,
+        map_json_event_error, normalize_port_name, parse_command, render_port_line,
+        select_recover_port, target_profile, try_run, wait_for_uboot_prompt, write_event_trace,
+        write_events, write_recover_summary, xmodem_config,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
     use std::io::{self, Write};
     use std::time::Duration;
@@ -1710,6 +1883,58 @@ mod tests {
             ProgressMode::Auto.resolve(false),
             ResolvedProgressMode::Plain
         );
+    }
+
+    #[test]
+    fn console_handoff_maps_common_keys_to_serial_bytes() {
+        assert_eq!(
+            console_action_for_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ConsoleAction::Send(vec![b'\r'])
+        );
+        assert_eq!(
+            console_action_for_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            ConsoleAction::Send(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            console_action_for_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE,)),
+            ConsoleAction::Send(vec![b'x'])
+        );
+    }
+
+    #[test]
+    fn console_handoff_uses_ctrl_c_and_ctrl_d_to_exit() {
+        assert_eq!(
+            console_action_for_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
+            ConsoleAction::Exit
+        );
+        assert_eq!(
+            console_action_for_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL,)),
+            ConsoleAction::Exit
+        );
+    }
+
+    #[test]
+    fn recover_summary_reports_completed_console_handoff() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
+            tty_status(true),
+        );
+        let mut stdout = Vec::new();
+
+        write_recover_summary(&mut stdout, &plan, PORT, &RecoverOutcome::Recovered, true).unwrap();
+
+        let rendered = String::from_utf8(stdout).unwrap();
+        assert!(rendered.contains("interactive console handoff ended"));
+        assert!(!rendered.contains("not implemented"));
     }
 
     #[test]
