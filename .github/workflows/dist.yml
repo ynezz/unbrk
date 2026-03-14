@@ -228,4 +228,4 @@ jobs:
             echo "no release artifacts were produced"
             exit 1
           fi
-          gh release upload "${{ needs.plan.outputs.tag }}" --clobber "${files[@]}"
+          gh release upload "${{ needs.plan.outputs.tag }}" --clobber "${files[@]}" -R "${{ github.repository }}"
