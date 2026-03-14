@@ -11,14 +11,17 @@ name = "unbrk-cli"
 changelog_path = "CHANGELOG.md"
 changelog_include = ["unbrk-core"]
 git_only = true
+publish = false
 git_release_enable = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 
 [[package]]
 name = "unbrk-core"
+publish = false
 release = false
 
 [[package]]
 name = "xtask"
+publish = false
 release = false
