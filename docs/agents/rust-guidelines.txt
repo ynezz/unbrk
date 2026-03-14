@@ -760,7 +760,7 @@ Use hierarchical dot-notation: `<component>.<operation>.<state>`
 event!(
     Level::INFO,
     file.path = file_path,
-    "file {{file.path}} processed succesfully",
+    "file {{file.path}} processed successfully",
 );
 
 // Good: Named events
@@ -768,7 +768,7 @@ event!(
     name: "file.processing.success", // event identifier
     Level::INFO,
     file.path = file_path,
-    "file {{file.path}} processed succesfully",
+    "file {{file.path}} processed successfully",
 );
 ```
 
@@ -2057,7 +2057,7 @@ fn send_network(x: impl AsRef<[u8]>) {}
 
 // Further analysis needed. In these cases the function wants
 // ownership of some `String` or `Vec<u8>`. If those are
-// "low freqency, low volume" functions `AsRef` has better ergonomics,
+// "low frequency, low volume" functions `AsRef` has better ergonomics,
 // otherwise accepting a `String` or `Vec<u8>` will have better
 // performance.
 fn new_instance(x: impl AsRef<str>) -> HoldsString {}
@@ -2434,4 +2434,3 @@ should be free to do so.
 
 
 ---
-
