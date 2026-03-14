@@ -70,7 +70,7 @@ mod tests {
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_unbrk"));
         let transcript_path = transcript_path();
         let command = format!(
-            "env -u NO_COLOR {} recover --port /dev/ttyFAKE --preloader {} --fip {} --progress fancy",
+            "env -u NO_COLOR TERM=xterm-256color {} recover --port /dev/ttyFAKE --preloader {} --fip {} --progress fancy",
             shell_quote(&binary),
             shell_quote(&preloader),
             shell_quote(&fip),
