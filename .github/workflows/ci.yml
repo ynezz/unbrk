@@ -17,8 +17,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  checks:
-    name: ${{ matrix.os }}
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Install cargo-deny and typos
+        uses: taiki-e/install-action@1dcbf2bdd1cc32135a68fdcd77374bd01e13abda # v2.68.28
+        with:
+          tool: cargo-deny,typos-cli
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check dependency policy
+        run: cargo deny check
+
+      - name: Run typos
+        run: typos
+
+  test:
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -32,17 +53,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
-      - name: Ensure pinned Rust toolchain is active
-        run: rustup show active-toolchain
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install CI cargo tools
-        run: |
-          cargo install --locked cargo-deny
-          cargo install --locked cargo-nextest
-          cargo install --locked typos-cli
-
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@1dcbf2bdd1cc32135a68fdcd77374bd01e13abda # v2.68.28
+        with:
+          tool: cargo-nextest
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -52,9 +69,3 @@ jobs:
 
       - name: Run doc tests
         run: cargo test --doc --workspace
-
-      - name: Check dependency policy
-        run: cargo deny check
-
-      - name: Run typos
-        run: typos
