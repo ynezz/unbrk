@@ -10,6 +10,7 @@ use std::time::Duration;
 
 /// Default timeout for one U-Boot command round-trip.
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Parsed `loadaddr` value from `printenv loadaddr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +149,16 @@ pub fn run_command(
                     source,
                 });
             }
+        }
+
+        if output.len() > MAX_COMMAND_OUTPUT_BYTES {
+            return Err(UnbrkError::Protocol {
+                stage: RecoveryStage::UBoot,
+                detail: format!(
+                    "U-Boot command output exceeded {MAX_COMMAND_OUTPUT_BYTES} bytes before the prompt reappeared"
+                ),
+                recent_console: ConsoleTail::from_buffer(&output),
+            });
         }
 
         let search_cursor = prompt_search_cursor(&regex, &output);
@@ -341,9 +352,9 @@ fn compile_prompt_error(error: &regex::Error) -> UnbrkError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, TransferSize, UBootCommandOutput,
-        parse_filesize, parse_loadaddr, parse_mmc_erase_success, parse_mmc_write_success,
-        parse_total_size, run_command,
+        DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, MAX_COMMAND_OUTPUT_BYTES, TransferSize,
+        UBootCommandOutput, parse_filesize, parse_loadaddr, parse_mmc_erase_success,
+        parse_mmc_write_success, parse_total_size, run_command,
     };
     use crate::target::AN7581;
     use crate::transport::{MockStep, MockTransport};
@@ -368,6 +379,67 @@ mod tests {
         .unwrap();
 
         assert!(output.as_lossy_str().contains("loadaddr=0x81800000"));
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn run_command_rejects_output_that_exceeds_the_capture_limit() {
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(DEFAULT_COMMAND_TIMEOUT),
+            MockStep::Write(b"version\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(vec![b'x'; MAX_COMMAND_OUTPUT_BYTES + 256]),
+        ]);
+
+        let error = run_command(
+            &mut transport,
+            AN7581.prompts.uboot,
+            "version",
+            DEFAULT_COMMAND_TIMEOUT,
+        )
+        .unwrap_err();
+
+        match error {
+            crate::error::UnbrkError::Protocol {
+                stage,
+                detail,
+                recent_console,
+            } => {
+                assert_eq!(stage, crate::event::RecoveryStage::UBoot);
+                assert!(detail.contains("exceeded"));
+                assert_eq!(
+                    recent_console.as_bytes(),
+                    vec![b'x'; crate::error::MAX_CONSOLE_TAIL_BYTES]
+                );
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn run_command_accepts_output_at_the_capture_limit_when_the_prompt_arrives() {
+        let prompt = b"\r\nAN7581> ".to_vec();
+        let filler_len = MAX_COMMAND_OUTPUT_BYTES - prompt.len();
+        let mut output = vec![b'x'; filler_len];
+        output.extend_from_slice(&prompt);
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(DEFAULT_COMMAND_TIMEOUT),
+            MockStep::Write(b"version\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(output),
+        ]);
+
+        let output = run_command(
+            &mut transport,
+            AN7581.prompts.uboot,
+            "version",
+            DEFAULT_COMMAND_TIMEOUT,
+        )
+        .unwrap();
+
+        assert_eq!(output.as_bytes().len(), MAX_COMMAND_OUTPUT_BYTES);
         transport.assert_finished();
     }
 
