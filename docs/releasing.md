@@ -112,31 +112,55 @@ push to `main`. Key details:
   created tags/releases can trigger downstream workflows (e.g., binary
   builds)
 
-## Manual Release
+## Manual Release (Current Process)
 
-To trigger a release manually (e.g., after fixing a failed release):
+The automated `release-plz release-pr` job is currently blocked by an
+upstream bug ([release-plz#2595](https://github.com/release-plz/release-plz/issues/2595))
+where `cargo package` fails for workspaces with unpublished path
+dependencies. Until that is fixed, releases are created manually:
 
-1. Go to **Actions** > **release-plz** workflow
-2. Click **Run workflow** on the `main` branch
+```bash
+# 1. Bump version in workspace root
+#    Edit Cargo.toml: version = "X.Y.Z"
 
-This runs both jobs. If the current version has no tag, the release job
-will create it.
+# 2. Update CHANGELOG.md with the new version section
+
+# 3. Commit the version bump
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit -s -m "chore: release vX.Y.Z"
+
+# 4. Push, tag, and create the GitHub Release
+git push
+git tag vX.Y.Z
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file CHANGELOG.md
+```
+
+Once release-plz#2595 is fixed, the automated release-pr flow described
+above will handle steps 1-3 automatically via PR.
 
 ## Troubleshooting
 
-### "nothing to release"
+### release-plz release-pr fails with "cargo package failed"
 
-The release job found no unreleased versions. Common causes:
+This is the upstream bug. The error looks like:
 
-- The version in `Cargo.toml` already has a matching git tag
-- The release PR hasn't been merged yet (version not bumped)
-- Missing `fetch-tags: true` in checkout (release-plz can't see tags)
+```
+error: failed to prepare local package for uploading
+Caused by: no matching package named `unbrk-core` found
+  location searched: crates.io index
+```
 
-### Release PR doesn't bump version
+`cargo package` tries to resolve the `unbrk-core` path dependency from
+crates.io, which fails because it's not published there. Track
+[release-plz#2595](https://github.com/release-plz/release-plz/issues/2595)
+for a fix.
 
-For initial releases where the version is already set in `Cargo.toml`
-(e.g., `0.1.0`), release-plz may only add a changelog without bumping
-the version. This is expected — the next release PR will bump to `0.2.0`.
+### "skipping release: current commit is not from a release PR"
+
+The `release-plz release` job only creates releases when it detects the
+current commit is from a merged release-plz PR. Manual version bumps
+won't trigger it — use `gh release create` directly instead.
 
 ### Token permissions
 
