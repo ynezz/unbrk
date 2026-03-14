@@ -1,6 +1,7 @@
 //! Blocking serial transport abstractions.
 
 use serialport::{DataBits, FlowControl, Parity, StopBits};
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
@@ -43,6 +44,199 @@ impl SerialTransport {
     #[must_use]
     pub const fn path(&self) -> &str {
         self.path.as_str()
+    }
+}
+
+/// Scripted transport step for [`MockTransport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockStep {
+    /// Return these bytes from the next read operation.
+    Read(Vec<u8>),
+    /// Delay inbound bytes without sleeping wall-clock time.
+    Delay(Duration),
+    /// Return an error from the next read operation.
+    ReadError {
+        kind: io::ErrorKind,
+        message: String,
+    },
+    /// Expect the next write operation to match these bytes exactly.
+    Write(Vec<u8>),
+    /// Return an error from the next write operation.
+    WriteError {
+        kind: io::ErrorKind,
+        message: String,
+    },
+    /// Expect a flush operation.
+    Flush,
+    /// Return an error from the next flush operation.
+    FlushError {
+        kind: io::ErrorKind,
+        message: String,
+    },
+    /// Expect a timeout update to the provided value.
+    SetTimeout(Duration),
+}
+
+/// Scripted transport implementation for transport-agnostic tests.
+///
+/// This lets unit and integration tests replay captured UART bytes, split
+/// prompts across multiple reads, inject timeout/error conditions, and assert
+/// expected writes without touching real hardware.
+#[derive(Debug, Default)]
+pub struct MockTransport {
+    script: VecDeque<MockStep>,
+    pending_read: VecDeque<u8>,
+    pending_delay: Option<Duration>,
+    timeout: Duration,
+    writes: Vec<Vec<u8>>,
+    reads: Vec<u8>,
+    flush_count: usize,
+    timeout_updates: Vec<Duration>,
+}
+
+impl MockTransport {
+    /// Creates a scripted transport from ordered steps.
+    #[must_use]
+    pub fn new(steps: impl IntoIterator<Item = MockStep>) -> Self {
+        Self {
+            script: steps.into_iter().collect(),
+            pending_read: VecDeque::new(),
+            pending_delay: None,
+            timeout: Duration::from_secs(1),
+            writes: Vec::new(),
+            reads: Vec::new(),
+            flush_count: 0,
+            timeout_updates: Vec::new(),
+        }
+    }
+
+    /// Creates a transport that only scripts read chunks.
+    #[must_use]
+    pub fn from_reads(chunks: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        Self::new(chunks.into_iter().map(Self::read_step))
+    }
+
+    /// Creates a transport that only scripts inbound byte chunks.
+    #[must_use]
+    pub fn from_rx_chunks(chunks: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        Self::from_reads(chunks)
+    }
+
+    /// Returns the currently configured timeout.
+    #[must_use]
+    pub const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Returns the write operations observed so far.
+    #[must_use]
+    pub const fn writes(&self) -> &[Vec<u8>] {
+        self.writes.as_slice()
+    }
+
+    /// Returns the bytes delivered through successful read operations.
+    #[must_use]
+    pub const fn rx_log(&self) -> &[u8] {
+        self.reads.as_slice()
+    }
+
+    /// Returns the number of observed flush calls.
+    #[must_use]
+    pub const fn flush_count(&self) -> usize {
+        self.flush_count
+    }
+
+    /// Returns the timeout updates observed so far.
+    #[must_use]
+    pub const fn timeout_updates(&self) -> &[Duration] {
+        self.timeout_updates.as_slice()
+    }
+
+    /// Returns whether the scripted steps and buffered read bytes are exhausted.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.script.is_empty() && self.pending_read.is_empty() && self.pending_delay.is_none()
+    }
+
+    /// Asserts that the scripted transport was fully consumed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if unread scripted steps, buffered inbound bytes, or pending
+    /// virtual delay remain.
+    pub fn assert_finished(&self) {
+        assert!(
+            self.is_finished(),
+            "mock transport still has pending state: script={:?}, pending_read={:?}, pending_delay={:?}",
+            self.script,
+            self.pending_read,
+            self.pending_delay
+        );
+    }
+
+    const fn read_step(bytes: Vec<u8>) -> MockStep {
+        MockStep::Read(bytes)
+    }
+
+    fn read_from_pending(&mut self, buffer: &mut [u8]) -> usize {
+        let read_len = buffer.len().min(self.pending_read.len());
+
+        for slot in buffer.iter_mut().take(read_len) {
+            *slot = self
+                .pending_read
+                .pop_front()
+                .expect("pending read length checked");
+        }
+
+        self.reads.extend_from_slice(&buffer[..read_len]);
+        read_len
+    }
+
+    fn write_error(kind: io::ErrorKind, message: String) -> io::Error {
+        io::Error::new(kind, message)
+    }
+
+    fn advance_delay(&mut self) -> io::Result<bool> {
+        let Some(remaining) = self.pending_delay else {
+            return Ok(false);
+        };
+
+        if remaining.is_zero() {
+            self.pending_delay = None;
+            return Ok(false);
+        }
+
+        if self.timeout.is_zero() {
+            return Err(Self::write_error(
+                io::ErrorKind::TimedOut,
+                String::from("mock transport virtual delay cannot advance with a zero timeout"),
+            ));
+        }
+
+        if remaining > self.timeout {
+            self.pending_delay = Some(
+                remaining
+                    .checked_sub(self.timeout)
+                    .expect("remaining delay exceeds timeout"),
+            );
+            return Err(Self::write_error(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "mock transport virtual delay exceeded timeout {:?}; {:?} still pending",
+                    self.timeout,
+                    self.pending_delay.expect("pending delay updated")
+                ),
+            ));
+        }
+
+        self.pending_delay = None;
+        Ok(true)
+    }
+
+    fn unexpected_step_error(operation: &str, step: &MockStep) -> io::Error {
+        io::Error::other(format!(
+            "mock transport expected {operation}, found scripted step {step:?}"
+        ))
     }
 }
 
@@ -136,6 +330,94 @@ impl Transport for SerialTransport {
     }
 }
 
+impl Transport for MockTransport {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if !self.pending_read.is_empty() {
+                return Ok(self.read_from_pending(buffer));
+            }
+
+            if self.pending_delay.is_some() {
+                self.advance_delay()?;
+                continue;
+            }
+
+            match self.script.pop_front() {
+                None => return Ok(0),
+                Some(MockStep::Read(bytes)) => {
+                    self.pending_read = bytes.into();
+                }
+                Some(MockStep::Delay(delay)) => {
+                    self.pending_delay = Some(delay);
+                }
+                Some(MockStep::ReadError { kind, message }) => {
+                    return Err(Self::write_error(kind, message));
+                }
+                Some(step) => return Err(Self::unexpected_step_error("read", &step)),
+            }
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        match self.script.pop_front() {
+            Some(MockStep::Write(expected)) => {
+                if expected != bytes {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "mock transport write mismatch: expected {expected:?}, got {bytes:?}"
+                        ),
+                    ));
+                }
+            }
+            Some(MockStep::WriteError { kind, message }) => {
+                return Err(Self::write_error(kind, message));
+            }
+            Some(step) => return Err(Self::unexpected_step_error("write", &step)),
+            None => {}
+        }
+
+        self.writes.push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(step) = self.script.pop_front() {
+            match step {
+                MockStep::Flush => {}
+                MockStep::FlushError { kind, message } => {
+                    return Err(Self::write_error(kind, message));
+                }
+                _ => return Err(Self::unexpected_step_error("flush", &step)),
+            }
+        }
+
+        self.flush_count += 1;
+        Ok(())
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        if let Some(step) = self.script.pop_front() {
+            match step {
+                MockStep::SetTimeout(expected) if expected == timeout => {}
+                MockStep::SetTimeout(expected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "mock transport timeout mismatch: expected {expected:?}, got {timeout:?}"
+                        ),
+                    ));
+                }
+                _ => return Err(Self::unexpected_step_error("set_timeout", &step)),
+            }
+        }
+
+        self.timeout = timeout;
+        self.timeout_updates.push(timeout);
+        Ok(())
+    }
+}
+
 fn serial_port_builder(
     _path: &str,
     baud_rate: u32,
@@ -176,7 +458,10 @@ fn map_serialport_error(path: &str, error: &serialport::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_BAUD_RATE, Transport, map_serialport_error, serial_port_builder};
+    use super::{
+        DEFAULT_BAUD_RATE, MockStep, MockTransport, Transport, map_serialport_error,
+        serial_port_builder,
+    };
     use serialport::{DataBits, FlowControl, Parity, StopBits};
     use std::io;
     use std::time::Duration;
@@ -308,5 +593,130 @@ mod tests {
 
         assert_eq!(io_error.kind(), io::ErrorKind::PermissionDenied);
         assert!(io_error.to_string().contains("permission denied"));
+    }
+
+    #[test]
+    fn mock_transport_replays_read_chunks_in_order() {
+        let mut transport =
+            MockTransport::from_rx_chunks([b"Press ".to_vec(), b"x\r\n".to_vec(), b"C".to_vec()]);
+        let mut buffer = [0_u8; 16];
+
+        assert_eq!(transport.read(&mut buffer).unwrap(), 6);
+        assert_eq!(&buffer[..6], b"Press ");
+        assert_eq!(transport.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer[..3], b"x\r\n");
+        assert_eq!(transport.read(&mut buffer).unwrap(), 1);
+        assert_eq!(&buffer[..1], b"C");
+        assert_eq!(transport.read(&mut buffer).unwrap(), 0);
+        assert_eq!(transport.rx_log(), b"Press x\r\nC");
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn mock_transport_splits_large_read_chunks_across_multiple_reads() {
+        let mut transport = MockTransport::from_rx_chunks([b"fragmented".to_vec()]);
+        let mut buffer = [0_u8; 4];
+
+        assert_eq!(transport.read(&mut buffer).unwrap(), 4);
+        assert_eq!(&buffer, b"frag");
+        assert_eq!(transport.read(&mut buffer).unwrap(), 4);
+        assert_eq!(&buffer, b"ment");
+        assert_eq!(transport.read(&mut buffer).unwrap(), 2);
+        assert_eq!(&buffer[..2], b"ed");
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn mock_transport_validates_expected_writes_and_flushes() {
+        let mut transport = MockTransport::new([
+            MockStep::Write(vec![b'x']),
+            MockStep::Flush,
+            MockStep::SetTimeout(Duration::from_secs(2)),
+        ]);
+
+        transport.write_byte(b'x').unwrap();
+        transport.set_timeout(Duration::from_secs(2)).unwrap();
+
+        assert_eq!(transport.writes(), &[vec![b'x']]);
+        assert_eq!(transport.flush_count(), 1);
+        assert_eq!(transport.timeout_updates(), &[Duration::from_secs(2)]);
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn mock_transport_reports_write_mismatches() {
+        let mut transport = MockTransport::new([MockStep::Write(vec![b'x'])]);
+        let error = transport.write(b"y").unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("write mismatch"));
+    }
+
+    #[test]
+    fn mock_transport_can_inject_timeout_errors() {
+        let mut transport = MockTransport::new([MockStep::ReadError {
+            kind: io::ErrorKind::TimedOut,
+            message: String::from("simulated timeout"),
+        }]);
+        let mut buffer = [0_u8; 8];
+        let error = transport.read(&mut buffer).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("simulated timeout"));
+    }
+
+    #[test]
+    fn mock_transport_uses_virtual_delay_without_sleeping() {
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(Duration::from_millis(100)),
+            MockStep::Delay(Duration::from_millis(250)),
+            MockStep::SetTimeout(Duration::from_millis(75)),
+            MockStep::Read(vec![b'C']),
+        ]);
+        let mut buffer = [0_u8; 8];
+
+        transport.set_timeout(Duration::from_millis(100)).unwrap();
+        let first = transport.read(&mut buffer).unwrap_err();
+        assert_eq!(first.kind(), io::ErrorKind::TimedOut);
+
+        transport.set_timeout(Duration::from_millis(75)).unwrap();
+        let second = transport.read(&mut buffer).unwrap_err();
+        assert_eq!(second.kind(), io::ErrorKind::TimedOut);
+
+        assert_eq!(transport.read(&mut buffer).unwrap(), 1);
+        assert_eq!(&buffer[..1], b"C");
+        assert_eq!(
+            transport.timeout_updates(),
+            &[Duration::from_millis(100), Duration::from_millis(75)]
+        );
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn mock_transport_can_inject_write_and_flush_errors() {
+        let mut write_transport = MockTransport::new([MockStep::WriteError {
+            kind: io::ErrorKind::BrokenPipe,
+            message: String::from("uart disconnected"),
+        }]);
+        let write_error = write_transport.write(b"loadx\n").unwrap_err();
+        assert_eq!(write_error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(write_error.to_string().contains("uart disconnected"));
+
+        let mut flush_transport = MockTransport::new([MockStep::FlushError {
+            kind: io::ErrorKind::WouldBlock,
+            message: String::from("flush stalled"),
+        }]);
+        let flush_error = flush_transport.flush().unwrap_err();
+        assert_eq!(flush_error.kind(), io::ErrorKind::WouldBlock);
+        assert!(flush_error.to_string().contains("flush stalled"));
+    }
+
+    #[test]
+    fn mock_transport_reports_out_of_order_operations() {
+        let mut transport = MockTransport::new([MockStep::Read(vec![b'C'])]);
+        let error = transport.flush().unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("expected flush"));
     }
 }
