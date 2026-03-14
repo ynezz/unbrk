@@ -44,6 +44,12 @@ impl ConsoleTail {
     #[must_use]
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
         let bytes = bytes.into();
+        Self::from_buffer(bytes.as_slice())
+    }
+
+    /// Creates a console snapshot from the trailing bytes of a borrowed UART buffer.
+    #[must_use]
+    pub fn from_buffer(bytes: &[u8]) -> Self {
         let start = bytes.len().saturating_sub(MAX_CONSOLE_TAIL_BYTES);
 
         Self {
@@ -197,6 +203,16 @@ mod tests {
         let tail = ConsoleTail::new(input);
 
         assert_eq!(tail.as_bytes().len(), MAX_CONSOLE_TAIL_BYTES);
+    }
+
+    #[test]
+    fn console_tail_from_buffer_matches_owned_constructor() {
+        let input = vec![b'y'; MAX_CONSOLE_TAIL_BYTES + 25];
+
+        assert_eq!(
+            ConsoleTail::from_buffer(input.as_slice()),
+            ConsoleTail::new(input)
+        );
     }
 
     #[test]

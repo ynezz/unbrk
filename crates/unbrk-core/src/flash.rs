@@ -366,7 +366,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
             image,
             expected_bytes,
             observed_bytes: total_size.decimal_bytes,
-            recent_console: ConsoleTail::new(output.as_bytes().to_vec()),
+            recent_console: ConsoleTail::from_buffer(output.as_bytes()),
         })
     }
 
@@ -397,7 +397,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
                 image,
                 expected_bytes,
                 observed_bytes,
-                recent_console: ConsoleTail::new(output.as_bytes().to_vec()),
+                recent_console: ConsoleTail::from_buffer(output.as_bytes()),
             });
         }
 
@@ -585,7 +585,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 
     fn console_tail(&self) -> ConsoleTail {
-        ConsoleTail::new(self.console.clone())
+        ConsoleTail::from_buffer(&self.console)
     }
 }
 

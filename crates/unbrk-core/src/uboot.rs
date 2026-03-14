@@ -170,7 +170,7 @@ pub fn parse_loadaddr(output: &UBootCommandOutput) -> Result<LoadAddr, UnbrkErro
         UnbrkError::Protocol {
             stage: RecoveryStage::UBoot,
             detail: format!("U-Boot loadaddr {value} does not fit in u32"),
-            recent_console: ConsoleTail::new(output.as_bytes().to_vec()),
+            recent_console: ConsoleTail::from_buffer(output.as_bytes()),
         }
     })?;
 
@@ -314,7 +314,7 @@ fn missing_output_error(output: &UBootCommandOutput, label: &str) -> UnbrkError 
     UnbrkError::Protocol {
         stage: RecoveryStage::UBoot,
         detail: format!("{label} did not report success"),
-        recent_console: ConsoleTail::new(output.as_bytes().to_vec()),
+        recent_console: ConsoleTail::from_buffer(output.as_bytes()),
     }
 }
 
@@ -326,7 +326,7 @@ fn malformed_output_error(
     UnbrkError::Protocol {
         stage: RecoveryStage::UBoot,
         detail: format!("failed to parse {label}: {error}"),
-        recent_console: ConsoleTail::new(output.as_bytes().to_vec()),
+        recent_console: ConsoleTail::from_buffer(output.as_bytes()),
     }
 }
 

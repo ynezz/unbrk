@@ -461,7 +461,7 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
     }
 
     fn console_tail(&self) -> ConsoleTail {
-        ConsoleTail::new(self.console.clone())
+        ConsoleTail::from_buffer(&self.console)
     }
 
     fn invalid_prompt_regex(error: &regex::Error) -> UnbrkError {
