@@ -484,7 +484,7 @@ fn build_flash_plan(args: &RecoverArgs, target: TargetProfile) -> Result<FlashPl
     Ok(FlashPlan {
         block_size: defaults.block_size,
         erase_ranges: vec![EraseRange::new(
-            BlockOffset::new(0),
+            defaults.erase_range.start_block,
             BlockCount::new(
                 args.erase_block_count
                     .map(u32::try_from)
@@ -1054,7 +1054,9 @@ mod tests {
     use std::io::{self, Write};
     use std::time::Duration;
     use unbrk_core::event::{Event, EventPayload, RecoveryStage};
-    use unbrk_core::target::{AN7581, BlockCount, BlockOffset, PromptPattern};
+    use unbrk_core::target::{
+        AN7581, BlockCount, BlockOffset, BlockRange, FlashLayout, PromptPattern, TargetProfile,
+    };
     use unbrk_core::{MockStep, MockTransport};
 
     const PORT: &str = "/dev/ttyUSB0";
@@ -1476,7 +1478,10 @@ mod tests {
         let flash_plan = build_flash_plan(&plan.args, target_profile(&plan.args)).unwrap();
 
         assert_eq!(flash_plan.block_size, AN7581.flash.block_size);
-        assert_eq!(flash_plan.erase_ranges[0].start_block, BlockOffset::new(0));
+        assert_eq!(
+            flash_plan.erase_ranges[0].start_block,
+            AN7581.flash.erase_range.start_block
+        );
         assert_eq!(
             flash_plan.erase_ranges[0].block_count,
             BlockCount::new(0x900)
@@ -1496,6 +1501,44 @@ mod tests {
         assert_eq!(
             flash_plan.write_stages[1].block_count,
             BlockCount::new(0x710)
+        );
+    }
+
+    #[test]
+    fn flash_plan_builder_uses_target_erase_start_block() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--flash-persistent",
+                "--erase-block-count",
+                "0x900",
+            ],
+            tty_status(false),
+        );
+        let target = TargetProfile {
+            flash: FlashLayout {
+                erase_range: BlockRange::new(BlockOffset::new(0x40), BlockCount::new(0x800)),
+                ..AN7581.flash
+            },
+            ..AN7581
+        };
+
+        let flash_plan = build_flash_plan(&plan.args, target).unwrap();
+
+        assert_eq!(
+            flash_plan.erase_ranges[0].start_block,
+            BlockOffset::new(0x40)
+        );
+        assert_eq!(
+            flash_plan.erase_ranges[0].block_count,
+            BlockCount::new(0x900)
         );
     }
 
