@@ -9,10 +9,11 @@ optionally, the follow-on U-Boot flash sequence.
 - macOS and Windows are portability targets only until they each have their
   own real-device validation evidence.
 
-The current macOS portability claim comes from the `test (macos-latest)` job in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml), which runs the
-simulated clippy, nextest, and doc-test suite. It does not imply real-device
-UART recovery has been validated on macOS yet.
+The current macOS and Windows portability claims come from the
+`test (macos-latest)` and `test (windows-latest)` jobs in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml), which run the simulated
+clippy, nextest, and doc-test suite. They do not imply real-device UART
+recovery has been validated on either host yet.
 
 ## Quick Start
 
