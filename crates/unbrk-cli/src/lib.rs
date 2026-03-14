@@ -426,9 +426,10 @@ fn execute_recover(
 fn xmodem_config(args: &RecoverArgs) -> XmodemConfig {
     XmodemConfig::new(
         duration_override(args.packet_timeout, XMODEM_DEFAULT_PACKET_TIMEOUT),
-        args.xmodem_retry
+        args.xmodem_block_retry
             .unwrap_or(XMODEM_DEFAULT_BLOCK_RETRY_LIMIT),
-        args.xmodem_retry.unwrap_or(XMODEM_DEFAULT_EOT_RETRY_LIMIT),
+        args.xmodem_eot_retry
+            .unwrap_or(XMODEM_DEFAULT_EOT_RETRY_LIMIT),
     )
 }
 
@@ -774,7 +775,9 @@ struct RecoverArgs {
     #[arg(long, value_name = "SECONDS")]
     packet_timeout: Option<u64>,
     #[arg(long, value_name = "COUNT")]
-    xmodem_retry: Option<u32>,
+    xmodem_block_retry: Option<u32>,
+    #[arg(long, value_name = "COUNT")]
+    xmodem_eot_retry: Option<u32>,
     #[arg(long, value_name = "SECONDS")]
     command_timeout: Option<u64>,
     #[arg(long, value_name = "SECONDS")]
@@ -1047,7 +1050,7 @@ mod tests {
         CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
         TerminalStatus, append_events, build_flash_plan, flush_event_writer, map_json_event_error,
         parse_command, target_profile, try_run, wait_for_uboot_prompt, write_event_trace,
-        write_events,
+        write_events, xmodem_config,
     };
     use std::io::{self, Write};
     use std::time::Duration;
@@ -1055,6 +1058,7 @@ mod tests {
     use unbrk_core::target::{
         AN7581, BlockCount, BlockOffset, BlockRange, FlashLayout, PromptPattern, TargetProfile,
     };
+    use unbrk_core::xmodem::{XMODEM_DEFAULT_BLOCK_RETRY_LIMIT, XMODEM_DEFAULT_EOT_RETRY_LIMIT};
     use unbrk_core::{MockStep, MockTransport};
 
     const PORT: &str = "/dev/ttyUSB0";
@@ -1126,6 +1130,99 @@ mod tests {
 
         assert_eq!(plan.progress_mode, ResolvedProgressMode::Plain);
         assert!(!plan.console_handoff_allowed);
+    }
+
+    #[test]
+    fn xmodem_retry_flags_default_independently() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
+            tty_status(true),
+        );
+
+        let config = xmodem_config(&plan.args);
+
+        assert_eq!(config.block_retry_limit, XMODEM_DEFAULT_BLOCK_RETRY_LIMIT);
+        assert_eq!(config.eot_retry_limit, XMODEM_DEFAULT_EOT_RETRY_LIMIT);
+    }
+
+    #[test]
+    fn xmodem_block_retry_override_leaves_eot_default() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--xmodem-block-retry",
+                "4",
+            ],
+            tty_status(true),
+        );
+
+        let config = xmodem_config(&plan.args);
+
+        assert_eq!(config.block_retry_limit, 4);
+        assert_eq!(config.eot_retry_limit, XMODEM_DEFAULT_EOT_RETRY_LIMIT);
+    }
+
+    #[test]
+    fn xmodem_eot_retry_override_leaves_block_default() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--xmodem-eot-retry",
+                "2",
+            ],
+            tty_status(true),
+        );
+
+        let config = xmodem_config(&plan.args);
+
+        assert_eq!(config.block_retry_limit, XMODEM_DEFAULT_BLOCK_RETRY_LIMIT);
+        assert_eq!(config.eot_retry_limit, 2);
+    }
+
+    #[test]
+    fn removed_combined_xmodem_retry_flag_is_rejected() {
+        let error = parse_command(
+            [
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--xmodem-retry",
+                "5",
+            ],
+            tty_status(true),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.exit_code(), CliExitCode::BadInput);
+        assert!(error.to_string().contains("--xmodem-retry"));
     }
 
     #[test]

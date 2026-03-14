@@ -209,7 +209,8 @@ Initial `recover` inputs:
 - `--fip <path>`
 - `--prompt-timeout`
 - `--packet-timeout`
-- `--xmodem-retry`
+- `--xmodem-block-retry`
+- `--xmodem-eot-retry`
 - `--command-timeout`
 - `--reset-timeout`
 - `--log-file <path>` (structured logs and events)
