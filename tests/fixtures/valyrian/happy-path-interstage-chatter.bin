@@ -1,0 +1,114 @@
+NOTICE:  SECURE_AREA : 0 
+
+AN7581DRAMC V1.0
+pkg_type is BGA1
+MPLL setting done !!!
+dram_type = PCDDR4, data_rate = 2666
+DIV mode = 1
+APHY RG Setting
+DelayCellTimex100 (cell=1071)
+MRW RK0 MR#2 = 0x30
+MRW RK0 MR#3 = 0x200
+MRW RK0 MR#1 = 0x101
+MRW RK0 MR#4 = 0x800
+MRW RK0 MR#5 = 0x400
+MRW RK0 MR#6 = 0xce0
+MRW RK0 MR#6 = 0xce0
+MRW RK0 MR#6 = 0xc60
+MRW RK0 MR#0 = 0xf44
+[Dramc] PCDDR AC Timing update 
+DRVP driving setting info: 42
+ODTP driving setting info: 42
+DRVN driving setting info: 42
+ODTN driving setting info: 42
+MRW RK0 MR#2 = 0x30
+MRW RK0 MR#1 = 0x181
+MRW RK0 MR#1 = 0x101
+MRW RK0 MR#2 = 0x30
+MRW RK0 MR#3 = 0x204
+MRW RK0 MR#3 = 0x200
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xc40
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcc2
+MRW RK0 MR#6 = 0xc42
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcc4
+MRW RK0 MR#6 = 0xc44
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcc6
+MRW RK0 MR#6 = 0xc46
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcc8
+MRW RK0 MR#6 = 0xc48
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcca
+MRW RK0 MR#6 = 0xc4a
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xccc
+MRW RK0 MR#6 = 0xc4c
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcce
+MRW RK0 MR#6 = 0xc4e
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcd0
+MRW RK0 MR#6 = 0xc50
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcd2
+MRW RK0 MR#6 = 0xc52
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcd4
+MRW RK0 MR#6 = 0xc54
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcd6
+MRW RK0 MR#6 = 0xc56
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcd8
+MRW RK0 MR#6 = 0xc58
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcda
+MRW RK0 MR#6 = 0xc5a
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcdc
+MRW RK0 MR#6 = 0xc5c
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcde
+MRW RK0 MR#6 = 0xc5e
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xce0
+MRW RK0 MR#6 = 0xc60
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xce2
+MRW RK0 MR#6 = 0xc62
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xce4
+MRW RK0 MR#6 = 0xc64
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xce6
+MRW RK0 MR#6 = 0xc66
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xce8
+MRW RK0 MR#6 = 0xc68
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcea
+MRW RK0 MR#6 = 0xc6a
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcec
+MRW RK0 MR#6 = 0xc6c
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcee
+MRW RK0 MR#6 = 0xc6e
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcf0
+MRW RK0 MR#6 = 0xc70
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcf2
+MRW RK0 MR#6 = 0xc72
+MRW RK0 MR#6 = 0xcc0
+MRW RK0 MR#6 = 0xcf2
+MRW RK0 MR#6 = 0xc72
+BG_num = 2
+DRAM FLOW DONE!!!
+NOTICE:  SECURE_AREA : 0 
+NOTICE:  3-3-3

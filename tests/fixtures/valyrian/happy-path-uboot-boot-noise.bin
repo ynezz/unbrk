@@ -1,0 +1,17 @@
+INFO:    GICv3 without legacy support detected.
+INFO:    ARM GICv3 driver initialized in EL3
+INFO:    Maximum SPI INTID supported: 287
+
+
+U-Boot 2026.01-OpenWrt-r0+30548-398a0c4449 (Mar 12 2026 - 19:13:58 +0000)
+
+CPU:   Airoha AN7581
+DRAM:  512 MiB
+Core:  21 devices, 15 uclasses, devicetree: separate
+MMC:   mmc@1fa0e000: 0
+Loading Environment from MMC... Reading from MMC(0)... OK
+In:    serial
+Out:   serial
+Err:   serial
+Net:   eth0: ethernet@1fb50000
+[?25l[2J[1;1H[1;1H[2K[2;3H*** U-Boot Boot Menu ***[0K[3;1H[2K[6;1H[2K[7;3HPress UP/DOWN to move, ENTER to select, ESC to quit[0K[8;1H[2K[4;7H[7m0. Exit[0m[6;3HHit any key to stop autoboot: 3 [6;3HHit any key to stop autoboot: 2 [6;3HHit any key to stop autoboot: 1 [6;1H[2K[?25h[2J[1;1H
