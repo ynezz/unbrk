@@ -663,9 +663,13 @@ fn describe_port_type(port_type: &SerialPortType) -> String {
 }
 
 fn handoff_console(transport: &mut impl Transport, stdout: &mut dyn Write) -> Result<(), RunError> {
+    let keys = Style::new()
+        .bold()
+        .for_stdout()
+        .apply_to("Ctrl-C or Ctrl-D");
     writeln!(
         stdout,
-        "Entering interactive console handoff. Press Ctrl-C or Ctrl-D to exit."
+        "{EMOJI_MONITOR}Entering interactive console handoff. Press {keys} to exit."
     )
     .map_err(|source| stdout_io_error("writing the console handoff banner", &source))?;
     stdout
@@ -678,8 +682,14 @@ fn handoff_console(transport: &mut impl Transport, stdout: &mut dyn Write) -> Re
         .map_err(|source| serial_run_error("setting the console handoff timeout", &source))?;
     relay_console_handoff(transport, stdout)?;
 
-    writeln!(stdout, "\r\nLeft interactive console handoff.")
-        .map_err(|source| stdout_io_error("writing the console handoff footer", &source))?;
+    // Use explicit \r\n at the end: raw mode is still active (the guard
+    // drops at function exit), so the kernel's opost translation is off
+    // and a bare \n would only move the cursor down, not back to column 0.
+    write!(
+        stdout,
+        "\r\n{EMOJI_MONITOR}Left interactive console handoff.\r\n"
+    )
+    .map_err(|source| stdout_io_error("writing the console handoff footer", &source))?;
     stdout
         .flush()
         .map_err(|source| stdout_io_error("flushing the console handoff footer", &source))
@@ -1678,7 +1688,8 @@ fn recover_startup_banner(
 }
 
 fn fancy_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile) -> Vec<String> {
-    let mut lines = banner_logo_lines();
+    let mut lines = vec![String::new()];
+    lines.extend(banner_logo_lines());
     lines.push(String::new());
     lines.push(format!(
         "{}{} {port} \u{00b7} {} \u{00b7} {} baud",
@@ -2011,45 +2022,38 @@ fn write_recover_summary(
     elapsed: Duration,
 ) -> Result<(), RunError> {
     static EMOJI_STAR: Emoji<'_, '_> = Emoji("\u{2b50} ", "* ");
+    let heading = Style::new().green().bold().for_stdout();
     writeln!(
         stdout,
-        "{EMOJI_STAR}Recovery completed in {} on {port} at {} baud.",
-        HumanDuration(elapsed),
+        "{EMOJI_STAR}{} on {port} at {} baud.",
+        heading.apply_to(format!("Recovery completed in {}", HumanDuration(elapsed))),
         plan.args.baud,
     )
     .map_err(|source| stdout_io_error("writing the recovery summary header", &source))?;
 
-    match outcome {
+    let detail = match outcome {
         RecoverOutcome::Recovered => {
             if console_handoff_completed {
-                writeln!(
-                    stdout,
-                    "Interactive console handoff ended at the RAM-resident U-Boot prompt."
+                format!(
+                    "   {EMOJI_MONITOR}Interactive console handoff ended at the RAM-resident U-Boot prompt."
                 )
-                .map_err(|source| {
-                    stdout_io_error("writing the recovery summary outcome", &source)
-                })?;
             } else {
-                writeln!(stdout, "Reached the RAM-resident U-Boot prompt.").map_err(|source| {
-                    stdout_io_error("writing the recovery summary outcome", &source)
-                })?;
+                format!("   {EMOJI_WRENCH}Reached the RAM-resident U-Boot prompt.")
             }
         }
         RecoverOutcome::FlashedAfterRecovery { reset_evidence } => {
-            writeln!(
-                stdout,
-                "Completed recovery and persistent flash. Observed reset evidence: {reset_evidence}"
+            format!(
+                "   {EMOJI_PACKAGE}Completed recovery and persistent flash. Reset evidence: {reset_evidence}"
             )
-            .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
         }
         RecoverOutcome::FlashedFromExistingPrompt { reset_evidence } => {
-            writeln!(
-                stdout,
-                "Resumed from an existing U-Boot prompt and completed the persistent flash. Observed reset evidence: {reset_evidence}"
+            format!(
+                "   {EMOJI_RESUME}Resumed from existing U-Boot prompt; persistent flash complete. Reset evidence: {reset_evidence}"
             )
-            .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
         }
-    }
+    };
+    writeln!(stdout, "{detail}")
+        .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
 
     Ok(())
 }
@@ -2513,9 +2517,10 @@ mod tests {
 
         let lines = fancy_startup_banner(&plan, PORT, &AN7581);
 
-        assert_eq!(&lines[..5], &FANCY_UNBRK_LOGO_LINES);
-        assert!(lines[5].is_empty());
-        assert!(lines[6].contains("Recovery"));
+        assert!(lines[0].is_empty());
+        assert_eq!(&lines[1..6], &FANCY_UNBRK_LOGO_LINES);
+        assert!(lines[6].is_empty());
+        assert!(lines[7].contains("Recovery"));
     }
 
     #[test]
