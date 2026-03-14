@@ -536,13 +536,13 @@ impl FixtureRecoveryScenario {
             ),
             LabeledStep::new(
                 ReplayPoint::MmcWritePreloaderOutput,
-                MockStep::Write(b"mmc write $loadaddr 0x4 0xfc\n".to_vec()),
+                MockStep::Write(b"mmc write $loadaddr 0x4 0x1\n".to_vec()),
             ),
             LabeledStep::new(ReplayPoint::MmcWritePreloaderOutput, MockStep::Flush),
             LabeledStep::new(
                 ReplayPoint::MmcWritePreloaderOutput,
                 MockStep::Read(
-                    b"AN7581> mmc write $loadaddr 0x4 0xfc\r\n252 blocks written: OK\r\nAN7581> "
+                    b"AN7581> mmc write $loadaddr 0x4 0x1\r\n1 blocks written: OK\r\nAN7581> "
                         .to_vec(),
                 ),
             ),
@@ -601,9 +601,7 @@ impl FixtureRecoveryScenario {
             LabeledStep::new(ReplayPoint::FilesizeFipOutput, MockStep::Flush),
             LabeledStep::new(
                 ReplayPoint::FilesizeFipOutput,
-                MockStep::Read(
-                    b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec(),
-                ),
+                MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec()),
             ),
             LabeledStep::new(
                 ReplayPoint::MmcWriteFipOutput,
@@ -611,13 +609,13 @@ impl FixtureRecoveryScenario {
             ),
             LabeledStep::new(
                 ReplayPoint::MmcWriteFipOutput,
-                MockStep::Write(b"mmc write $loadaddr 0x100 0x700\n".to_vec()),
+                MockStep::Write(b"mmc write $loadaddr 0x100 0x1\n".to_vec()),
             ),
             LabeledStep::new(ReplayPoint::MmcWriteFipOutput, MockStep::Flush),
             LabeledStep::new(
                 ReplayPoint::MmcWriteFipOutput,
                 MockStep::Read(
-                    b"AN7581> mmc write $loadaddr 0x100 0x700\r\n1792 blocks written: OK\r\nAN7581> "
+                    b"AN7581> mmc write $loadaddr 0x100 0x1\r\n1 blocks written: OK\r\nAN7581> "
                         .to_vec(),
                 ),
             ),

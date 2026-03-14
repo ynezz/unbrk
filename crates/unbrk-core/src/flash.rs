@@ -5,7 +5,7 @@ use crate::event::{
     Event, EventPayload, ImageKind, RecoveryStage, TransferStage, timestamp_now_unix_ms,
 };
 use crate::prompt::{PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex};
-use crate::target::{FlashPlan, TargetProfile, WriteStage};
+use crate::target::{BlockCount, FlashPlan, TargetProfile, WriteStage};
 use crate::transport::Transport;
 use crate::uboot::{
     DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, UBootCommandOutput, parse_filesize,
@@ -274,7 +274,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         self.verify_filesize(stage.image, payload, observed_size, &filesize_output)?;
         self.emit_command_completed("printenv filesize", "filesize verified");
 
-        self.write_stage_to_mmc(stage)?;
+        self.write_stage_to_mmc(stage, payload)?;
 
         Ok(StageTransferOutcome {
             recovered_from_eot_quirk,
@@ -417,11 +417,12 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         })
     }
 
-    fn write_stage_to_mmc(&mut self, stage: &WriteStage) -> Result<(), UnbrkError> {
+    fn write_stage_to_mmc(&mut self, stage: &WriteStage, payload: &[u8]) -> Result<(), UnbrkError> {
+        let block_count = payload_block_count(self.target.flash.block_size, payload);
         let write_command = format!(
             "mmc write $loadaddr {:#x} {:#x}",
             stage.start_block.get(),
-            stage.block_count.get(),
+            block_count.get(),
         );
         let write_output = self.run_uboot_command(write_command.as_str())?;
         parse_mmc_write_success(&write_output)?;
@@ -667,6 +668,14 @@ fn prepare_stage_payloads(plan: &FlashPlan) -> Result<Vec<PreparedStage>, UnbrkE
     Ok(prepared_stages)
 }
 
+fn payload_block_count(block_size: crate::target::MmcBlockSize, payload: &[u8]) -> BlockCount {
+    let payload_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+    let block_bytes = u64::from(block_size.get());
+    let blocks = payload_bytes.div_ceil(block_bytes);
+
+    BlockCount::new(u32::try_from(blocks).unwrap_or(u32::MAX))
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -675,10 +684,10 @@ fn file_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlashConfig, flash_from_uboot};
+    use super::{FlashConfig, flash_from_uboot, payload_block_count};
     use crate::error::UnbrkError;
     use crate::event::{EventPayload, ImageKind, TransferStage};
-    use crate::target::AN7581;
+    use crate::target::{AN7581, BlockCount};
     use crate::transport::{MockStep, MockTransport, Transport};
     use crate::uboot::{LoadAddr, UBootCommandOutput};
     use crate::xmodem::{XMODEM_ACK, XMODEM_NAK, XmodemConfig, build_crc_packet};
@@ -736,6 +745,21 @@ mod tests {
             EventPayload::UBootCommandStarted { command } if command == "reset"
         )));
         transport.assert_finished();
+    }
+
+    #[test]
+    fn payload_block_count_rounds_up_partial_blocks() {
+        let tiny_payload = [0x11_u8; 4];
+        let slightly_over_block = vec![0x22_u8; 513];
+
+        assert_eq!(
+            payload_block_count(AN7581.flash.block_size, &tiny_payload),
+            BlockCount::new(1)
+        );
+        assert_eq!(
+            payload_block_count(AN7581.flash.block_size, &slightly_over_block),
+            BlockCount::new(2)
+        );
     }
 
     #[test]
@@ -1131,11 +1155,10 @@ mod tests {
             MockStep::Flush,
             MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=4\r\nAN7581> ".to_vec()),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"mmc write $loadaddr 0x4 0xfc\n".to_vec()),
+            MockStep::Write(b"mmc write $loadaddr 0x4 0x1\n".to_vec()),
             MockStep::Flush,
             MockStep::Read(
-                b"AN7581> mmc write $loadaddr 0x4 0xfc\r\n252 blocks written: OK\r\nAN7581> "
-                    .to_vec(),
+                b"AN7581> mmc write $loadaddr 0x4 0x1\r\n1 blocks written: OK\r\nAN7581> ".to_vec(),
             ),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
             MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
@@ -1155,10 +1178,10 @@ mod tests {
             MockStep::Flush,
             MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec()),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"mmc write $loadaddr 0x100 0x700\n".to_vec()),
+            MockStep::Write(b"mmc write $loadaddr 0x100 0x1\n".to_vec()),
             MockStep::Flush,
             MockStep::Read(
-                b"AN7581> mmc write $loadaddr 0x100 0x700\r\n1792 blocks written: OK\r\nAN7581> "
+                b"AN7581> mmc write $loadaddr 0x100 0x1\r\n1 blocks written: OK\r\nAN7581> "
                     .to_vec(),
             ),
             MockStep::SetTimeout(RESET_TIMEOUT),

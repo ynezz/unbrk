@@ -405,7 +405,7 @@ fn happy_path_fixtures_drive_recovery_and_flash_end_to_end() {
 
     let flash_console = String::from_utf8_lossy(&run.flash.console);
     assert!(flash_console.contains("2048 blocks erased: OK"));
-    assert!(flash_console.contains("1792 blocks written: OK"));
+    assert!(flash_console.contains("1 blocks written: OK"));
     assert!(flash_console.contains("EcoNet System Reset"));
 
     run.transport.assert_finished();
@@ -491,7 +491,7 @@ fn mmc_write_failure_is_reported_with_console_context() {
         .run_with_flash_overrides([(
             ReplayPoint::MmcWritePreloaderOutput,
             vec![MockStep::Read(
-                b"AN7581> mmc write $loadaddr 0x4 0xfc\r\nwrite failed\r\nAN7581> ".to_vec(),
+                b"AN7581> mmc write $loadaddr 0x4 0x1\r\nwrite failed\r\nAN7581> ".to_vec(),
             )],
         )])
         .unwrap_err();
