@@ -16,6 +16,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+## Host Validation Matrix
+
+- Linux is the hardware-validation host. Real-device recovery and persistent
+  flash evidence live in `docs/hardware-validation-2026-03-14.md`.
+- macOS is a portability target. The CI workflow in
+  `.github/workflows/ci.yml` runs `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo nextest run --workspace`, and `cargo test --doc --workspace` on
+  `macos-latest`. The current commit `b2406d3` passed that job on
+  2026-03-14, but there is still no real-device macOS recovery evidence.
+- Windows remains a portability target as well. Its CI job exercises the same
+  simulated suite, but hardware validation still requires separate real-device
+  evidence before we can call Windows a validated recovery host.
+
+When working from a Linux-only workspace, do not claim local macOS validation.
+Use the CI matrix as portability evidence and keep real-device statements tied
+to captured host-specific recovery runs.
+
 ## Transcript And Fixture Coverage
 
 Targeted transcript-derived checks:

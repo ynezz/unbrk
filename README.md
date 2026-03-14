@@ -9,6 +9,11 @@ optionally, the follow-on U-Boot flash sequence.
 - macOS and Windows are portability targets only until they each have their
   own real-device validation evidence.
 
+The current macOS portability claim comes from the `test (macos-latest)` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml), which runs the
+simulated clippy, nextest, and doc-test suite. It does not imply real-device
+UART recovery has been validated on macOS yet.
+
 ## Quick Start
 
 Recovery to the temporary RAM-resident `AN7581>` prompt:
