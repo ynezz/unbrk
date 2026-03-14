@@ -431,7 +431,7 @@ mod tests {
             EventPayload::SessionStarted {
                 schema_version: EVENT_SCHEMA_VERSION,
                 tool_version: String::from("0.1.0"),
-                target_profile: String::from("valyrian"),
+                target_profile: String::from("an7581"),
                 serial_port: Some(String::from("/dev/ttyUSB0")),
             },
         );
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(json["timestamp_unix_ms"], 1234);
         assert_eq!(json["kind"], "session_started");
         assert_eq!(json["schema_version"], EVENT_SCHEMA_VERSION);
-        assert_eq!(json["target_profile"], "valyrian");
+        assert_eq!(json["target_profile"], "an7581");
         assert_eq!(json["serial_port"], "/dev/ttyUSB0");
     }
 

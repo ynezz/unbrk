@@ -1,8 +1,8 @@
-# Nokia Valyrian UART Recovery Protocol
+# Airoha AN7581 UART Recovery Protocol
 
 ## Summary
 
-The Nokia Valyrian recovery path is a two-stage UART conversation driven by
+The Airoha AN7581 recovery path is a two-stage UART conversation driven by
 plain-text prompts and XMODEM transfers. It is not the Mediatek BootROM packet
 protocol used by `mtk_uartboot`.
 
@@ -26,7 +26,7 @@ After that, permanent flashing happens with normal U-Boot commands.
 
 - Start from the board powered off.
 - Hold the reset button while powering on.
-- On Nokia Valyrian, the reset button is the middle button.
+- On Airoha AN7581, the reset button is the middle button.
 - The local board note says this asserts the `GPIO0` strap so BootROM enters
   serial recovery mode.
 
@@ -43,9 +43,9 @@ After that, permanent flashing happens with normal U-Boot commands.
 The image pair that matches the documented flow is:
 
 - Preloader:
-  `/var/home/ynezz/dev/tftp/prplos-airoha-an7581-nokia_valyrian-preloader.bin`
+  `/var/home/ynezz/dev/tftp/prplos-airoha-an7581-an7581-preloader.bin`
 - FIP:
-  `/var/home/ynezz/dev/tftp/prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip`
+  `/var/home/ynezz/dev/tftp/prplos-airoha-an7581-an7581-bl31-uboot.fip`
 
 Observed checksums:
 
@@ -55,7 +55,7 @@ Observed checksums:
   `54e8e701ba8ef2cc61d97bf9521c54014bbc57992f1a74a1954566417f707363`
 
 There is also a combined image,
-`prplos-airoha-an7581-nokia_valyrian-preloader-bl31-uboot.img`, but the local
+`prplos-airoha-an7581-an7581-preloader-bl31-uboot.img`, but the local
 board recovery note documents the two-transfer flow above, so that is the
 protocol `unbrk` should target first.
 
@@ -95,14 +95,14 @@ XMODEM sender.
 Typical direct send shape:
 
 ```bash
-sx /var/home/ynezz/dev/tftp/prplos-airoha-an7581-nokia_valyrian-preloader.bin \
+sx /var/home/ynezz/dev/tftp/prplos-airoha-an7581-an7581-preloader.bin \
   < /dev/ttyUSB0 > /dev/ttyUSB0
 ```
 
 Then repeat with:
 
 ```bash
-sx /var/home/ynezz/dev/tftp/prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip \
+sx /var/home/ynezz/dev/tftp/prplos-airoha-an7581-an7581-bl31-uboot.fip \
   < /dev/ttyUSB0 > /dev/ttyUSB0
 ```
 
@@ -136,7 +136,7 @@ recovery helpers without depending on `lrzsz`.
 This repo now includes a helper script that automates the same two-stage flow:
 
 ```bash
-python3 tools/valyrian_uart_recovery.py
+python3 tools/an7581_uart_recovery.py
 ```
 
 Useful options:
@@ -146,7 +146,7 @@ Useful options:
 - `--fip /path/to/bl31-uboot.fip`
 - `--resume-from-uboot`
 - `--stop-at-uboot`
-- `--transcript-file /tmp/valyrian-recovery.log`
+- `--transcript-file /tmp/an7581-recovery.log`
 
 The helper waits for `Press x`, sends `x`, waits for repeated `C`, sends the
 preloader over XMODEM, then repeats the same pattern for the FIP. It tolerates
@@ -176,15 +176,15 @@ should run.
 
 Board-specific note:
 
-- `/var/home/ynezz/dev/prpl/nokia/valyrian/docs/board-xmodem-recovery.txt`
+- `/var/home/ynezz/dev/prpl/nokia/an7581/docs/board-xmodem-recovery.txt`
 
 Host-side XMODEM usage note:
 
-- `/var/home/ynezz/dev/prpl/nokia/valyrian/docs/u-boot-xmodem-recovery.txt`
+- `/var/home/ynezz/dev/prpl/nokia/an7581/docs/u-boot-xmodem-recovery.txt`
 
 Post-recovery flash note:
 
-- `/var/home/ynezz/dev/prpl/nokia/valyrian/docs/u-boot-upgrade.txt`
+- `/var/home/ynezz/dev/prpl/nokia/an7581/docs/u-boot-upgrade.txt`
 
 Existing transfer history:
 
@@ -192,8 +192,8 @@ Existing transfer history:
 
 The minicom log shows repeated attempts that send exactly:
 
-- `prplos-airoha-an7581-nokia_valyrian-preloader.bin`
-- `prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip`
+- `prplos-airoha-an7581-an7581-preloader.bin`
+- `prplos-airoha-an7581-an7581-bl31-uboot.fip`
 
 which matches the board note's two-stage protocol.
 
@@ -204,10 +204,10 @@ Once temporary U-Boot is running, the local upgrade note uses:
 ```text
 mmc erase 0 0x800
 
-tftpboot prplos-airoha-an7581-nokia_valyrian-preloader.bin
+tftpboot prplos-airoha-an7581-an7581-preloader.bin
 mmc write $loadaddr 0x4 0xfc
 
-tftpboot prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip
+tftpboot prplos-airoha-an7581-an7581-bl31-uboot.fip
 mmc write $loadaddr 0x100 0x700
 ```
 
@@ -233,7 +233,7 @@ At the time of writing, `/dev/ttyUSB0` was present and usable, but the board was
 not emitting fresh recovery output, so this document is based on:
 
 - `docs/initial-plan.md`
-- the board-specific Valyrian recovery notes
+- the board-specific AN7581 recovery notes
 - the existing minicom transfer log
 
 To validate the exact live prompt text again, the board needs to be rebooted

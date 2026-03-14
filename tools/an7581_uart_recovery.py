@@ -32,10 +32,10 @@ except ImportError as exc:  # pragma: no cover - import guard
 
 
 DEFAULT_PRELOADER = (
-    Path.home() / "dev/tftp/prplos-airoha-an7581-nokia_valyrian-preloader.bin"
+    Path.home() / "dev/tftp/prplos-airoha-an7581-an7581-preloader.bin"
 )
 DEFAULT_FIP = (
-    Path.home() / "dev/tftp/prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip"
+    Path.home() / "dev/tftp/prplos-airoha-an7581-an7581-bl31-uboot.fip"
 )
 DEFAULT_ERASE_BLOCK_COUNT = 0x800
 DEFAULT_PRELOADER_START_BLOCK = 0x4
@@ -217,7 +217,7 @@ class SerialConsole:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Drive the Nokia Valyrian UART recovery flow over /dev/ttyUSB0 "
+            "Drive the Airoha AN7581 UART recovery flow over /dev/ttyUSB0 "
             "using prompt detection plus XMODEM."
         )
     )

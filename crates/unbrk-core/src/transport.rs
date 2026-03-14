@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-/// Default baud rate for the documented Valyrian recovery flow.
+/// Default baud rate for the documented AN7581 recovery flow.
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 
 /// Real serial transport backed by the `serialport` crate.
@@ -33,7 +33,7 @@ impl SerialTransport {
         Ok(Self { path, port })
     }
 
-    /// Opens a serial port using the default Valyrian baud rate.
+    /// Opens a serial port using the default AN7581 baud rate.
     ///
     /// # Errors
     ///

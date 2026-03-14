@@ -7,7 +7,7 @@ use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const VALYRIAN_RECOVERY_STAGE_ORDER: [RecoveryStage; 5] = [
+const AN7581_RECOVERY_STAGE_ORDER: [RecoveryStage; 5] = [
     RecoveryStage::Bootrom,
     RecoveryStage::PreloaderPrompt,
     RecoveryStage::FipPrompt,
@@ -15,16 +15,16 @@ const VALYRIAN_RECOVERY_STAGE_ORDER: [RecoveryStage; 5] = [
     RecoveryStage::FlashPlan,
 ];
 
-const VALYRIAN_RECOVERY_TRANSFER_ORDER: [TransferStage; 2] =
+const AN7581_RECOVERY_TRANSFER_ORDER: [TransferStage; 2] =
     [TransferStage::Preloader, TransferStage::Fip];
 
-const VALYRIAN_FLASH_TRANSFER_ORDER: [TransferStage; 2] =
+const AN7581_FLASH_TRANSFER_ORDER: [TransferStage; 2] =
     [TransferStage::LoadxPreloader, TransferStage::LoadxFip];
 
-/// Built-in profile for the Nokia Valyrian recovery flow.
+/// Built-in profile for the Airoha AN7581 recovery flow.
 #[allow(clippy::module_name_repetitions)]
-pub const VALYRIAN: TargetProfile = TargetProfile {
-    name: "nokia_valyrian",
+pub const AN7581: TargetProfile = TargetProfile {
+    name: "an7581",
     serial: SerialSettings {
         baud_rate: 115_200,
         data_bits: DataBits::Eight,
@@ -43,9 +43,9 @@ pub const VALYRIAN: TargetProfile = TargetProfile {
         preloader: BlockRange::new(BlockOffset::new(0x4), BlockCount::new(0xfc)),
         fip: BlockRange::new(BlockOffset::new(0x100), BlockCount::new(0x700)),
     },
-    recovery_stage_order: &VALYRIAN_RECOVERY_STAGE_ORDER,
-    recovery_transfer_order: &VALYRIAN_RECOVERY_TRANSFER_ORDER,
-    flash_transfer_order: &VALYRIAN_FLASH_TRANSFER_ORDER,
+    recovery_stage_order: &AN7581_RECOVERY_STAGE_ORDER,
+    recovery_transfer_order: &AN7581_RECOVERY_TRANSFER_ORDER,
+    flash_transfer_order: &AN7581_FLASH_TRANSFER_ORDER,
 };
 
 /// Strongly typed target definition for a single supported board profile.
@@ -416,8 +416,8 @@ fn file_size_bytes(path: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockCount, BlockOffset, FlashPlan, MmcBlockSize, VALYRIAN, VALYRIAN_FLASH_TRANSFER_ORDER,
-        VALYRIAN_RECOVERY_STAGE_ORDER, VALYRIAN_RECOVERY_TRANSFER_ORDER,
+        AN7581, AN7581_FLASH_TRANSFER_ORDER, AN7581_RECOVERY_STAGE_ORDER,
+        AN7581_RECOVERY_TRANSFER_ORDER, BlockCount, BlockOffset, FlashPlan, MmcBlockSize,
     };
     use crate::error::UnbrkError;
     use crate::event::{ImageKind, RecoveryStage, TransferStage};
@@ -429,37 +429,34 @@ mod tests {
     static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn valyrian_profile_regexes_compile() {
-        assert!(VALYRIAN.validate().is_ok());
+    fn an7581_profile_regexes_compile() {
+        assert!(AN7581.validate().is_ok());
     }
 
     #[test]
-    fn valyrian_serial_defaults_match_documented_line_settings() {
-        assert_eq!(VALYRIAN.serial.baud_rate, 115_200);
-        assert_eq!(VALYRIAN.serial.data_bits, DataBits::Eight);
-        assert_eq!(VALYRIAN.serial.parity, Parity::None);
-        assert_eq!(VALYRIAN.serial.stop_bits, StopBits::One);
-        assert_eq!(VALYRIAN.serial.flow_control, FlowControl::None);
+    fn an7581_serial_defaults_match_documented_line_settings() {
+        assert_eq!(AN7581.serial.baud_rate, 115_200);
+        assert_eq!(AN7581.serial.data_bits, DataBits::Eight);
+        assert_eq!(AN7581.serial.parity, Parity::None);
+        assert_eq!(AN7581.serial.stop_bits, StopBits::One);
+        assert_eq!(AN7581.serial.flow_control, FlowControl::None);
     }
 
     #[test]
-    fn valyrian_flash_layout_matches_the_protocol_doc() {
-        assert_eq!(VALYRIAN.flash.block_size, MmcBlockSize::new(512));
-        assert_eq!(VALYRIAN.flash.erase_range.start_block, BlockOffset::new(0));
+    fn an7581_flash_layout_matches_the_protocol_doc() {
+        assert_eq!(AN7581.flash.block_size, MmcBlockSize::new(512));
+        assert_eq!(AN7581.flash.erase_range.start_block, BlockOffset::new(0));
+        assert_eq!(AN7581.flash.erase_range.block_count, BlockCount::new(0x800));
+        assert_eq!(AN7581.flash.preloader.start_block, BlockOffset::new(0x4));
+        assert_eq!(AN7581.flash.preloader.block_count, BlockCount::new(0xfc));
+        assert_eq!(AN7581.flash.fip.start_block, BlockOffset::new(0x100));
+        assert_eq!(AN7581.flash.fip.block_count, BlockCount::new(0x700));
+    }
+
+    #[test]
+    fn an7581_stage_order_matches_expected_recovery_flow() {
         assert_eq!(
-            VALYRIAN.flash.erase_range.block_count,
-            BlockCount::new(0x800)
-        );
-        assert_eq!(VALYRIAN.flash.preloader.start_block, BlockOffset::new(0x4));
-        assert_eq!(VALYRIAN.flash.preloader.block_count, BlockCount::new(0xfc));
-        assert_eq!(VALYRIAN.flash.fip.start_block, BlockOffset::new(0x100));
-        assert_eq!(VALYRIAN.flash.fip.block_count, BlockCount::new(0x700));
-    }
-
-    #[test]
-    fn valyrian_stage_order_matches_expected_recovery_flow() {
-        assert_eq!(
-            VALYRIAN.recovery_stage_order,
+            AN7581.recovery_stage_order,
             &[
                 RecoveryStage::Bootrom,
                 RecoveryStage::PreloaderPrompt,
@@ -469,30 +466,24 @@ mod tests {
             ]
         );
         assert_eq!(
-            VALYRIAN.recovery_transfer_order,
+            AN7581.recovery_transfer_order,
             &[TransferStage::Preloader, TransferStage::Fip]
         );
         assert_eq!(
-            VALYRIAN.flash_transfer_order,
+            AN7581.flash_transfer_order,
             &[TransferStage::LoadxPreloader, TransferStage::LoadxFip]
         );
+        assert_eq!(AN7581.recovery_stage_order, &AN7581_RECOVERY_STAGE_ORDER);
         assert_eq!(
-            VALYRIAN.recovery_stage_order,
-            &VALYRIAN_RECOVERY_STAGE_ORDER
+            AN7581.recovery_transfer_order,
+            &AN7581_RECOVERY_TRANSFER_ORDER
         );
-        assert_eq!(
-            VALYRIAN.recovery_transfer_order,
-            &VALYRIAN_RECOVERY_TRANSFER_ORDER
-        );
-        assert_eq!(
-            VALYRIAN.flash_transfer_order,
-            &VALYRIAN_FLASH_TRANSFER_ORDER
-        );
+        assert_eq!(AN7581.flash_transfer_order, &AN7581_FLASH_TRANSFER_ORDER);
     }
 
     #[test]
     fn initial_prompt_pattern_also_matches_the_second_stage_text() {
-        let initial_prompt = VALYRIAN.prompts.initial_recovery.compile().unwrap();
+        let initial_prompt = AN7581.prompts.initial_recovery.compile().unwrap();
         let second_stage = "Press x to load BL31 + U-Boot FIP";
 
         assert!(initial_prompt.is_match(second_stage));
@@ -500,32 +491,26 @@ mod tests {
 
     #[test]
     fn flash_ranges_return_expected_capacity() {
+        assert_eq!(AN7581.flash.preloader.end_block(), BlockOffset::new(0x100));
         assert_eq!(
-            VALYRIAN.flash.preloader.end_block(),
-            BlockOffset::new(0x100)
-        );
-        assert_eq!(
-            VALYRIAN.flash.preloader.byte_len(VALYRIAN.flash.block_size),
+            AN7581.flash.preloader.byte_len(AN7581.flash.block_size),
             129_024
         );
-        assert_eq!(
-            VALYRIAN.flash.fip.byte_len(VALYRIAN.flash.block_size),
-            917_504
-        );
+        assert_eq!(AN7581.flash.fip.byte_len(AN7581.flash.block_size), 917_504);
     }
 
     #[test]
     fn flash_layout_can_select_ranges_by_image_kind() {
         assert_eq!(
-            VALYRIAN.flash.range_for(ImageKind::Preloader),
-            VALYRIAN.flash.preloader
+            AN7581.flash.range_for(ImageKind::Preloader),
+            AN7581.flash.preloader
         );
-        assert_eq!(VALYRIAN.flash.range_for(ImageKind::Fip), VALYRIAN.flash.fip);
+        assert_eq!(AN7581.flash.range_for(ImageKind::Fip), AN7581.flash.fip);
     }
 
     #[test]
-    fn valyrian_flash_plan_uses_the_documented_ranges() {
-        let plan = VALYRIAN.flash_plan("preloader.bin", "fip.bin");
+    fn an7581_flash_plan_uses_the_documented_ranges() {
+        let plan = AN7581.flash_plan("preloader.bin", "fip.bin");
 
         assert_eq!(plan.block_size, MmcBlockSize::new(512));
         assert_eq!(plan.erase_ranges.len(), 1);
@@ -544,7 +529,7 @@ mod tests {
     fn flash_plan_accepts_images_that_fit_exactly() {
         let preloader = temp_file_with_size(129_024);
         let fip = temp_file_with_size(917_504);
-        let plan = VALYRIAN.flash_plan(preloader.path.clone(), fip.path.clone());
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
 
         assert!(plan.validate_image_sizes().is_ok());
     }
@@ -553,7 +538,7 @@ mod tests {
     fn flash_plan_accepts_smaller_images() {
         let preloader = temp_file_with_size(64_000);
         let fip = temp_file_with_size(512_000);
-        let plan = VALYRIAN.flash_plan(preloader.path.clone(), fip.path.clone());
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
 
         assert!(plan.validate_image_sizes().is_ok());
     }
@@ -562,7 +547,7 @@ mod tests {
     fn flash_plan_rejects_images_that_exceed_by_one_byte() {
         let preloader = temp_file_with_size(129_025);
         let fip = temp_file_with_size(512_000);
-        let plan = VALYRIAN.flash_plan(preloader.path.clone(), fip.path.clone());
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
 
         assert_bad_input_contains(&plan, "exceeds the allocated flash window");
     }
@@ -571,7 +556,7 @@ mod tests {
     fn flash_plan_rejects_images_that_exceed_by_a_full_block() {
         let preloader = temp_file_with_size(129_024 + 512);
         let fip = temp_file_with_size(512_000);
-        let plan = VALYRIAN.flash_plan(preloader.path.clone(), fip.path.clone());
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
 
         assert_bad_input_contains(&plan, "exceeds the allocated flash window");
     }
@@ -580,7 +565,7 @@ mod tests {
     fn flash_plan_rejects_zero_size_images() {
         let preloader = temp_file_with_size(0);
         let fip = temp_file_with_size(512_000);
-        let plan = VALYRIAN.flash_plan(preloader.path.clone(), fip.path.clone());
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
 
         assert_bad_input_contains(&plan, "is empty");
     }

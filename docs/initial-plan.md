@@ -6,12 +6,12 @@ Status: Draft approved for implementation planning
 ## Summary
 
 `unbrk` will be a Rust-first CLI that targets Linux, macOS, and Windows while
-automating the documented UART recovery flow for Nokia Valyrian first.
+automating the documented UART recovery flow for Airoha AN7581 first.
 Linux should be treated as the first hardware-validated host, with macOS and
 Windows treated as portability targets until they have seen real-device runs.
 
 The design should leave room for later Airoha board support, but v1 should be
-explicitly grounded in the Valyrian protocol that has already been documented
+explicitly grounded in the AN7581 protocol that has already been documented
 and observed.
 
 The first release will focus on getting a board from power-off through a full
@@ -25,12 +25,12 @@ requested persistent bootloader reinstall, by:
 5. Detecting the second-stage prompt.
 6. Transferring the BL31 + U-Boot FIP over XMODEM.
 7. Waiting for a live RAM-resident U-Boot prompt.
-8. Optionally running the documented Valyrian U-Boot flash sequence over the
+8. Optionally running the documented AN7581 U-Boot flash sequence over the
    same UART session when the operator explicitly asks for persistent flashing.
 9. Observing post-flash reset activity, or handing off to an interactive
    console or machine-readable status stream at an explicit stop point.
 
-The existing Python helper demonstrates that the full Valyrian workflow is
+The existing Python helper demonstrates that the full AN7581 workflow is
 already practical as one continuous UART session. The plan should therefore
 keep the persistent flash phase in the same command, but it should require
 explicit user intent before erasing flash instead of treating destructive
@@ -44,9 +44,9 @@ external test harness.
 
 This plan is based on:
 
-- `docs/valyrian-uart-recovery-protocol.md`
-- `docs/valyrian-end-to-end.log`
-- `tools/valyrian_uart_recovery.py`
+- `docs/an7581-uart-recovery-protocol.md`
+- `docs/an7581-end-to-end.log`
+- `tools/an7581_uart_recovery.py`
 - local board XMODEM recovery notes
 - local U-Boot XMODEM recovery notes
 - local `mtk_uartboot` as a style and scope reference, not as a protocol match
@@ -54,7 +54,7 @@ This plan is based on:
 Key protocol facts from the recovery docs:
 
 - The recovery flow is prompt-driven over UART.
-- The entry condition is board-specific: on Valyrian the operator starts with
+- The entry condition is board-specific: on AN7581 the operator starts with
   the board powered off, then holds the middle reset button during power-on to
   enter BootROM recovery mode.
 - The documented UART settings are `115200` baud, `8N1`, with no flow control.
@@ -89,13 +89,13 @@ plus XMODEM transport, not around the Mediatek BootROM protocol used by
 ## Approved Product Decisions
 
 - Language: Rust for v1.
-- v1 scope: automate Nokia Valyrian recovery from BootROM entry to a usable
+- v1 scope: automate Airoha AN7581 recovery from BootROM entry to a usable
   RAM-resident U-Boot prompt by default, and support the documented persistent
   U-Boot flash sequence as an explicit opt-in phase.
 - Release scope: GitHub Releases, checksums, provenance/attestations, and a
   crates.io / `cargo install` path once the public CLI contract is ready.
 - Deferred scope: Homebrew, Scoop, Winget, and generalized multi-board flash
-  commands beyond the initial Valyrian flow.
+  commands beyond the initial AN7581 flow.
 
 ## Goals
 
@@ -112,7 +112,7 @@ plus XMODEM transport, not around the Mediatek BootROM protocol used by
 
 - Support for additional Airoha boards or SoCs before the initial target works
   well.
-- Generalizing the Valyrian flash layout into a board-agnostic abstraction
+- Generalizing the AN7581 flash layout into a board-agnostic abstraction
   before the initial target works well.
 - GUI tooling.
 - Backward compatibility with unstable internal APIs.
@@ -140,11 +140,11 @@ unbrk/
   xtask/
   docs/
     initial-plan.md
-    valyrian-uart-recovery-protocol.md
+    an7581-uart-recovery-protocol.md
     testing.md
   tests/
     fixtures/
-      valyrian/
+      an7581/
 ```
 
 ## Architecture
@@ -159,7 +159,7 @@ unbrk/
 - Prompt detection and recovery state machine.
 - XMODEM send logic.
 - U-Boot command execution and prompt-synchronized command parsing.
-- Flash-plan execution for the documented Valyrian `mmc erase`, `loadx`,
+- Flash-plan execution for the documented AN7581 `mmc erase`, `loadx`,
   `mmc write`, `reset` sequence.
 - Recovery transcript capture and parsing, preserving raw bytes.
 - Structured event model shared by human and agent output modes.
@@ -217,7 +217,7 @@ Initial `recover` inputs:
 - `--uboot-prompt <regex>`
 - `--flash-persistent`
 - `--resume-from-uboot` (expert-only)
-- expert-only block-layout overrides for the documented Valyrian flash layout
+- expert-only block-layout overrides for the documented AN7581 flash layout
 - `--progress auto|plain|fancy|off`
 - `--non-interactive`
 - `--json`
@@ -353,7 +353,7 @@ Important implementation note:
 - The flash plan should validate image-size-to-block-count fit before issuing
   `mmc erase` or `mmc write`, rather than assuming the documented ranges are
   always large enough for whatever images the operator supplied.
-- The Valyrian flash phase should parse `filesize` as hexadecimal even when
+- The AN7581 flash phase should parse `filesize` as hexadecimal even when
   U-Boot omits the `0x` prefix.
 - The implementation should distinguish `flash sequence completed`,
   `reset observed`, and `persistent boot verified`; only the last of those can
@@ -374,7 +374,7 @@ Important implementation note:
 - Unit tests that confirm stage-local matching so the second prompt cannot be
   mistaken for the first.
 - XMODEM tests using fixtures and mocked transports.
-- Convert `docs/valyrian-end-to-end.log` into fixtures immediately, then add
+- Convert `docs/an7581-end-to-end.log` into fixtures immediately, then add
   multiple fresh captures across repeated recoveries before treating any prompt
   matcher as settled.
 
@@ -505,10 +505,10 @@ Versioning policy:
 Ship with:
 
 - `README.md` with quick start and supported workflow
-- `docs/valyrian-uart-recovery-protocol.md` for the current board's observed
+- `docs/an7581-uart-recovery-protocol.md` for the current board's observed
   prompts, transfer order, and documented quirks
 - `docs/testing.md` for simulated transport and hardware test instructions
-- `tests/fixtures/valyrian/` for transcript-derived serial fixtures
+- `tests/fixtures/an7581/` for transcript-derived serial fixtures
 - `CONTRIBUTING.md` for local dev workflow
 - `AGENTS.md` with repo-specific instructions for coding agents
 
@@ -558,7 +558,7 @@ Deliverables:
 - state machine
 - XMODEM send path
 - U-Boot command runner
-- Valyrian flash-plan executor
+- AN7581 flash-plan executor
 - transcript logging
 - transcript-backed fixtures derived from the existing log plus multiple fresh
   real recovery captures
@@ -593,7 +593,7 @@ Exit criteria:
 Deliverables:
 
 - tested against the initial target board on the first hardware-validated host
-- Valyrian protocol notes and fixtures updated from real transcripts
+- AN7581 protocol notes and fixtures updated from real transcripts
 - advertised host-OS support level documented explicitly
 - recovery operator guidance refined
 
@@ -630,7 +630,7 @@ Recommended order of work:
    multiple fresh serial transcripts to lock down prompt matching.
 4. Implement prompt-driven state machine.
 5. Implement XMODEM upload support.
-6. Implement the U-Boot command runner, `loadx` verification, and Valyrian
+6. Implement the U-Boot command runner, `loadx` verification, and AN7581
    flash-plan executor.
 7. Add simulated integration tests anchored to captured transcripts.
 8. Validate the first end-to-end happy path on target hardware.
@@ -650,7 +650,7 @@ Recommended order of work:
   Mitigation: keep transport abstract, test on all target OSes in CI, and avoid
   platform-specific assumptions in CLI logic.
 
-- The Valyrian flash offsets or block counts could be wrong for another image
+- The AN7581 flash offsets or block counts could be wrong for another image
   layout or board revision.
   Mitigation: keep the flash plan explicitly profile-backed, expose expert
   overrides, validate image fit against the configured block size and block
@@ -699,5 +699,5 @@ After this plan is accepted, the first implementation tasks should be:
    transcripts to lock down prompt matching
 4. implement the prompt-driven state machine
 5. implement XMODEM upload support
-6. build the U-Boot command runner and Valyrian flash-plan executor directly
+6. build the U-Boot command runner and AN7581 flash-plan executor directly
    from the proven helper sequence

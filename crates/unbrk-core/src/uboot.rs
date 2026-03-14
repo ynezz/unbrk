@@ -363,7 +363,7 @@ mod tests {
         parse_filesize, parse_loadaddr, parse_mmc_erase_success, parse_mmc_write_success,
         parse_total_size, run_command,
     };
-    use crate::target::VALYRIAN;
+    use crate::target::AN7581;
     use crate::transport::{MockStep, MockTransport};
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
 
         let output = run_command(
             &mut transport,
-            VALYRIAN.prompts.uboot,
+            AN7581.prompts.uboot,
             "printenv loadaddr",
             DEFAULT_COMMAND_TIMEOUT,
         )

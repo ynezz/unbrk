@@ -75,16 +75,16 @@ pub fn advance_to_prompt(
 #[cfg(test)]
 mod tests {
     use super::{PromptMatch, advance_to_prompt, find_prompt};
-    use crate::target::VALYRIAN;
+    use crate::target::AN7581;
 
     const STAGE1_PROMPT: &[u8] =
-        include_bytes!("../../../tests/fixtures/valyrian/happy-path-stage1-prompt.bin");
+        include_bytes!("../../../tests/fixtures/an7581/happy-path-stage1-prompt.bin");
     const STAGE2_PROMPT: &[u8] =
-        include_bytes!("../../../tests/fixtures/valyrian/happy-path-stage2-prompt.bin");
+        include_bytes!("../../../tests/fixtures/an7581/happy-path-stage2-prompt.bin");
 
     #[test]
     fn initial_prompt_matches_the_stage1_fixture() {
-        let matched = find_prompt(VALYRIAN.prompts.initial_recovery, STAGE1_PROMPT, 0)
+        let matched = find_prompt(AN7581.prompts.initial_recovery, STAGE1_PROMPT, 0)
             .unwrap()
             .unwrap();
 
@@ -99,14 +99,14 @@ mod tests {
 
     #[test]
     fn initial_prompt_does_not_consume_the_longer_stage2_prompt() {
-        let matched = find_prompt(VALYRIAN.prompts.initial_recovery, STAGE2_PROMPT, 0).unwrap();
+        let matched = find_prompt(AN7581.prompts.initial_recovery, STAGE2_PROMPT, 0).unwrap();
 
         assert_eq!(matched, None);
     }
 
     #[test]
     fn second_prompt_matches_the_stage2_fixture() {
-        let matched = find_prompt(VALYRIAN.prompts.second_stage, STAGE2_PROMPT, 0)
+        let matched = find_prompt(AN7581.prompts.second_stage, STAGE2_PROMPT, 0)
             .unwrap()
             .unwrap();
 
@@ -125,11 +125,11 @@ mod tests {
         let full = STAGE2_PROMPT;
 
         assert_eq!(
-            find_prompt(VALYRIAN.prompts.second_stage, prefix, 0).unwrap(),
+            find_prompt(AN7581.prompts.second_stage, prefix, 0).unwrap(),
             None
         );
 
-        let matched = find_prompt(VALYRIAN.prompts.second_stage, full, 0)
+        let matched = find_prompt(AN7581.prompts.second_stage, full, 0)
             .unwrap()
             .unwrap();
         assert_eq!(matched.next_cursor, 33);
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn prompt_matching_accepts_control_terminated_lines() {
-        let matched = find_prompt(VALYRIAN.prompts.initial_recovery, b"noise\rPress x\n", 0)
+        let matched = find_prompt(AN7581.prompts.initial_recovery, b"noise\rPress x\n", 0)
             .unwrap()
             .unwrap();
 
@@ -153,13 +153,13 @@ mod tests {
         combined.extend_from_slice(STAGE2_PROMPT);
 
         let mut cursor = 0;
-        let first = advance_to_prompt(VALYRIAN.prompts.initial_recovery, &combined, &mut cursor)
+        let first = advance_to_prompt(AN7581.prompts.initial_recovery, &combined, &mut cursor)
             .unwrap()
             .unwrap();
         assert_eq!(first.prompt, "Press x");
         assert_eq!(cursor, 7);
 
-        let second = advance_to_prompt(VALYRIAN.prompts.second_stage, &combined, &mut cursor)
+        let second = advance_to_prompt(AN7581.prompts.second_stage, &combined, &mut cursor)
             .unwrap()
             .unwrap();
         assert_eq!(second.prompt, "Press x to load BL31 + U-Boot FIP");

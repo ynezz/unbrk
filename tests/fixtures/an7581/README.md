@@ -1,7 +1,7 @@
-# Valyrian Transcript Fixtures
+# AN7581 Transcript Fixtures
 
 These fixtures were extracted directly from
-`docs/valyrian-end-to-end.log`, which is our current ground-truth capture for
+`docs/an7581-end-to-end.log`, which is our current ground-truth capture for
 the documented happy path.
 
 The split keeps stage boundaries explicit so later parser and state-machine

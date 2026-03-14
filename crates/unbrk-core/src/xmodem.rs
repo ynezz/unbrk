@@ -454,9 +454,9 @@ mod tests {
     use std::time::Duration;
 
     const STAGE1_CRC_READY: &[u8] =
-        include_bytes!("../../../tests/fixtures/valyrian/happy-path-stage1-crc-readiness.bin");
+        include_bytes!("../../../tests/fixtures/an7581/happy-path-stage1-crc-readiness.bin");
     const STAGE2_CRC_READY: &[u8] =
-        include_bytes!("../../../tests/fixtures/valyrian/happy-path-stage2-crc-readiness.bin");
+        include_bytes!("../../../tests/fixtures/an7581/happy-path-stage2-crc-readiness.bin");
     const PACKET_LEN: usize = 3 + XMODEM_BLOCK_SIZE + 2;
     const TEST_PACKET_TIMEOUT: Duration = Duration::from_millis(250);
 

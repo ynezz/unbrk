@@ -1,6 +1,6 @@
 # Contributing
 
-`unbrk` is a Rust-first CLI for automating Nokia Valyrian UART recovery. The
+`unbrk` is a Rust-first CLI for automating Airoha AN7581 UART recovery. The
 repository is still in early bootstrap, so changes should keep the codebase
 small, explicit, and easy to verify.
 
@@ -42,7 +42,7 @@ Keep PR titles human-readable so they map cleanly to future changelog entries.
 
 ## Fixtures And Logs
 
-Transcript-derived fixtures belong under `tests/fixtures/valyrian/` once that
+Transcript-derived fixtures belong under `tests/fixtures/an7581/` once that
 test layout exists. When adding or updating fixtures:
 
 - preserve the original raw transcript source when possible
@@ -63,5 +63,5 @@ concerns:
 - capture transcripts from hardware runs when behavior changes
 
 Until the dedicated testing docs land, use `docs/initial-plan.md`,
-`docs/valyrian-uart-recovery-protocol.md`, and `tools/valyrian_uart_recovery.py`
+`docs/an7581-uart-recovery-protocol.md`, and `tools/an7581_uart_recovery.py`
 as the current references for expected behavior.
