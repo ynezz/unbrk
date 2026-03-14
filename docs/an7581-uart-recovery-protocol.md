@@ -29,6 +29,10 @@ After that, permanent flashing happens with normal U-Boot commands.
 - On Airoha AN7581, the reset button is the middle button.
 - The local board note says this asserts the `GPIO0` strap so BootROM enters
   serial recovery mode.
+- For live `unbrk recover` runs, start the command first, then perform exactly
+  one controlled restart while it is waiting for the initial prompt.
+- Do not keep pressing reset after `Press x` has appeared or once XMODEM has
+  started. Repeated restarts can invalidate the run underneath the tool.
 
 ## Serial Parameters
 
@@ -172,6 +176,23 @@ only want the RAM-resident recovery stage, or `--resume-from-uboot` if the
 board is already sitting at a live `AN7581>` prompt and only the flash phase
 should run.
 
+## Failure Signatures
+
+Live validation and stored transcripts from 2026-03-14 show these important
+operator-facing signatures:
+
+- No `Press x` before `prompt-timeout`: the board did not enter recovery in
+  time, the wrong serial port is open, or the UART link is unhealthy.
+- `xCCC` after the host sends `x`: expected. The input echo and the repeated
+  `C` bytes belong to the normal CRC-ready transition.
+- `NOTICE:  3-3-3` before the second prompt: expected second-stage chatter,
+  not a prompt mismatch.
+- ANSI bytes before `AN7581>`: expected boot-menu noise, not a broken prompt.
+- Sender-side complaints at the final XMODEM `EOT` boundary: only terminal if
+  the console fails to advance to the next prompt or to a live U-Boot prompt.
+- `U-Boot` text without a later `AN7581>` prompt: incomplete recovery. Restart
+  from a clean power cycle instead of assuming the run succeeded.
+
 ## Evidence From Existing Local Notes
 
 Board-specific note:
@@ -229,12 +250,12 @@ recovery protocol's job ends once RAM-resident U-Boot is available.
 
 ## Live Validation Status
 
-At the time of writing, `/dev/ttyUSB0` was present and usable, but the board was
-not emitting fresh recovery output, so this document is based on:
+Live Linux validation happened on 2026-03-14 against Nokia Valyrian on
+`/dev/ttyS4`:
 
-- `docs/initial-plan.md`
-- the board-specific AN7581 recovery notes
-- the existing minicom transfer log
+- repeated clean recoveries reached the live `AN7581>` prompt
+- persistent flash completed from `--resume-from-uboot`
+- fresh transcripts were captured for two clean runs and one interrupted run
 
-To validate the exact live prompt text again, the board needs to be rebooted
-back into recovery mode.
+See `docs/hardware-validation-2026-03-14.md` for the exact commands, timings,
+transcript locations, and operator guidance derived from those runs.

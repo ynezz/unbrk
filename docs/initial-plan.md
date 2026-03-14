@@ -508,6 +508,8 @@ Ship with:
 - `README.md` with quick start and supported workflow
 - `docs/an7581-uart-recovery-protocol.md` for the current board's observed
   prompts, transfer order, and documented quirks
+- `docs/hardware-validation-2026-03-14.md` for real-device Linux evidence,
+  failure signatures, and operator recovery guidance
 - `docs/testing.md` for simulated transport and hardware test instructions
 - `tests/fixtures/an7581/` for transcript-derived serial fixtures
 - `CONTRIBUTING.md` for local dev workflow
@@ -518,6 +520,14 @@ The README should include:
 - a human-driven full end-to-end recovery example
 - a machine-driven `--json --non-interactive` example
 - an example that stops at temporary U-Boot for debugging
+
+Current status on 2026-03-14:
+
+- `README.md` and `docs/testing.md` are now the operator-facing entry points
+- `docs/hardware-validation-2026-03-14.md` holds the current Linux
+  real-device evidence and the failure-mode note
+- transcript-derived fixtures under `tests/fixtures/an7581/` include both the
+  original happy-path captures and real-hardware prompt-variation slices
 
 ## Agent-Oriented Project Conventions
 
@@ -604,6 +614,15 @@ Exit criteria:
 - macOS and Windows remain portability targets unless and until they each have
   their own successful real-device recovery evidence
 - known failure modes documented
+
+Current status on 2026-03-14:
+
+- Linux real-device recovery and persistent flash validation are done
+- fresh clean and interrupted transcripts are captured under
+  `artifacts/hardware-transcripts/2026-03-14/`
+- transcript-derived prompt and CRC fixtures have been updated from those runs
+- macOS and Windows still remain portability targets pending their own
+  validation passes
 
 ### Milestone 4: Release hardening
 

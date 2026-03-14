@@ -112,6 +112,48 @@ Flash timing from the emitted event stream:
 - FIP `mmc write`: about 0.12s
 - Reset evidence after `reset`: about 0.06s
 
+## Known Failure Modes
+
+Observed or capture-backed failure signatures from the same setup:
+
+- Repeated manual restarts after `recover` has already started can invalidate
+  the run. The first attempted session failed this way before the successful
+  controlled single-restart run.
+- An interrupted recovery can show `Press x`, then `CCC`, then later `U-Boot`
+  output without ever reaching `AN7581>`. The stored interrupted transcript in
+  `run-04-interrupted-manual/` shows exactly that shape and should be treated
+  as incomplete recovery, not success.
+- The board can echo the input byte before CRC readiness appears. `xCCC` is
+  normal and must not be interpreted as corruption.
+- The second-stage prompt can be preceded by boot chatter such as
+  `NOTICE:  3-3-3`, and the final `AN7581>` prompt can be preceded by ANSI
+  escape bytes. Those bytes are part of normal console noise on this target.
+- Sender-side transfer completion is less authoritative than console
+  progression. If the console advances to the expected next prompt or to
+  `AN7581>`, that forward progress matters more than a pristine final-EOT
+  handshake.
+- Additional terminal failure classes remain test-backed even though they were
+  not observed in the successful hardware runs above: `filesize` verification
+  mismatch after `loadx`, `mmc erase` failure, `mmc write` failure, and
+  missing reset evidence after `reset`.
+
+## Operator Recovery Guidance
+
+- Start `unbrk recover` first and let it wait on `/dev/ttyS4`.
+- Perform exactly one controlled reset after the command is already waiting.
+- Do not press reset again once `Press x` has appeared or while a transfer is
+  in progress.
+- If no prompt appears before `prompt-timeout`, stop and re-check recovery-mode
+  timing, serial-port selection, and cabling before trying again.
+- If the run reaches a live `AN7581>` prompt, leave the board alone until the
+  requested path completes. For `--flash-persistent`, wait for explicit reset
+  evidence instead of assuming a bare `U-Boot` banner proves success.
+- If `loadx` verification, `mmc erase`, `mmc write`, or reset evidence fails,
+  stop immediately and keep the JSON event log plus raw transcript for review
+  before attempting another destructive run.
+- Keep both the JSON event log and raw transcript for any failed run so prompt
+  timing and transfer state can be compared against the stored captures.
+
 ## Outcome
 
 `unbrk` successfully validated both required Linux hardware flows against the
