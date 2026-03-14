@@ -63,6 +63,11 @@ pub enum EventPayload {
         port: String,
         baud: u32,
     },
+    PromptWaiting {
+        stage: RecoveryStage,
+        elapsed_secs: u64,
+        timeout_secs: u64,
+    },
     PromptSeen {
         stage: RecoveryStage,
         prompt: String,
@@ -126,6 +131,7 @@ impl EventPayload {
         match self {
             Self::SessionStarted { .. } => EventKind::SessionStarted,
             Self::PortOpened { .. } => EventKind::PortOpened,
+            Self::PromptWaiting { .. } => EventKind::PromptWaiting,
             Self::PromptSeen { .. } => EventKind::PromptSeen,
             Self::InputSent { .. } => EventKind::InputSent,
             Self::CrcReady { .. } => EventKind::CrcReady,
@@ -197,6 +203,14 @@ impl fmt::Display for EventPayload {
             Self::PortOpened { port, baud } => {
                 write!(formatter, "opened serial port {port} at {baud} baud")
             }
+            Self::PromptWaiting {
+                stage,
+                elapsed_secs,
+                timeout_secs,
+            } => write!(
+                formatter,
+                "waiting for {stage} prompt ({elapsed_secs}s/{timeout_secs}s)"
+            ),
             Self::PromptSeen { stage, prompt } => {
                 write!(formatter, "{stage} prompt seen: {prompt}")
             }
@@ -284,6 +298,7 @@ impl fmt::Display for EventPayload {
 pub enum EventKind {
     SessionStarted,
     PortOpened,
+    PromptWaiting,
     PromptSeen,
     InputSent,
     CrcReady,
@@ -304,6 +319,7 @@ impl fmt::Display for EventKind {
         formatter.write_str(match self {
             Self::SessionStarted => "session_started",
             Self::PortOpened => "port_opened",
+            Self::PromptWaiting => "prompt_waiting",
             Self::PromptSeen => "prompt_seen",
             Self::InputSent => "input_sent",
             Self::CrcReady => "crc_ready",

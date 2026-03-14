@@ -16,6 +16,9 @@ use std::time::Duration;
 /// Default prompt timeout for each recovery state.
 pub const DEFAULT_PROMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default heartbeat interval for `PromptWaiting` events during prompt waits.
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Payloads required for the two recovery transfers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryImages<'a> {
@@ -29,6 +32,7 @@ pub struct RecoveryImages<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryConfig {
     pub prompt_timeout: Duration,
+    pub heartbeat_interval: Duration,
     pub xmodem: XmodemConfig,
 }
 
@@ -37,6 +41,7 @@ impl RecoveryConfig {
     pub const fn new(prompt_timeout: Duration, xmodem: XmodemConfig) -> Self {
         Self {
             prompt_timeout,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             xmodem,
         }
     }
@@ -382,12 +387,12 @@ where
         operation: &'static str,
     ) -> Result<PromptMatch, UnbrkError> {
         let regex = self.stage_prompt_regex(stage).clone();
-        self.transport
-            .set_timeout(self.config.prompt_timeout)
-            .map_err(|source| UnbrkError::Serial {
-                operation: "configuring the recovery prompt timeout",
-                source,
-            })?;
+        let chunk = self
+            .config
+            .heartbeat_interval
+            .min(self.config.prompt_timeout);
+        self.set_timeout(chunk)?;
+        let mut waited = Duration::ZERO;
 
         loop {
             if let Some(prompt) =
@@ -396,18 +401,18 @@ where
                 return Ok(prompt);
             }
 
-            self.read_more(stage, operation)?;
+            self.read_or_heartbeat(stage, operation, chunk, &mut waited)?;
         }
     }
 
     fn read_uboot_prompt(&mut self, operation: &'static str) -> Result<PromptMatch, UnbrkError> {
         let regex = self.uboot_prompt_regex.clone();
-        self.transport
-            .set_timeout(self.config.prompt_timeout)
-            .map_err(|source| UnbrkError::Serial {
-                operation: "configuring the recovery prompt timeout",
-                source,
-            })?;
+        let chunk = self
+            .config
+            .heartbeat_interval
+            .min(self.config.prompt_timeout);
+        self.set_timeout(chunk)?;
+        let mut waited = Duration::ZERO;
 
         loop {
             if let Some(prompt) = advance_to_prompt_allowing_trailing_space_with_regex(
@@ -418,7 +423,7 @@ where
                 return Ok(prompt);
             }
 
-            self.read_more(RecoveryStage::UBoot, operation)?;
+            self.read_or_heartbeat(RecoveryStage::UBoot, operation, chunk, &mut waited)?;
         }
     }
 
@@ -427,52 +432,87 @@ where
         stage: RecoveryStage,
         operation: &'static str,
     ) -> Result<CrcReadyMatch, UnbrkError> {
-        self.transport
-            .set_timeout(self.config.prompt_timeout)
-            .map_err(|source| UnbrkError::Serial {
-                operation: "configuring the recovery prompt timeout",
-                source,
-            })?;
+        let chunk = self
+            .config
+            .heartbeat_interval
+            .min(self.config.prompt_timeout);
+        self.set_timeout(chunk)?;
+        let mut waited = Duration::ZERO;
 
         loop {
             if let Some(readiness) = advance_to_crc_ready(&self.console, &mut self.cursor) {
                 return Ok(readiness);
             }
 
-            self.read_more(stage, operation)?;
+            self.read_or_heartbeat(stage, operation, chunk, &mut waited)?;
         }
     }
 
-    fn read_more(
+    fn set_timeout(&mut self, timeout: Duration) -> Result<(), UnbrkError> {
+        self.transport
+            .set_timeout(timeout)
+            .map_err(|source| UnbrkError::Serial {
+                operation: "configuring the recovery prompt timeout",
+                source,
+            })
+    }
+
+    /// Reads from the transport. If the read times out (zero bytes or
+    /// `TimedOut` error), advances `waited` by `chunk` and checks whether
+    /// the overall prompt timeout has been exceeded. When the timeout has
+    /// NOT been reached, a `PromptWaiting` heartbeat event is emitted so
+    /// the CLI can show progress.
+    fn read_or_heartbeat(
         &mut self,
         stage: RecoveryStage,
         operation: &'static str,
+        chunk: Duration,
+        waited: &mut Duration,
     ) -> Result<(), UnbrkError> {
         let mut scratch = [0_u8; 256];
         match self.transport.read(&mut scratch) {
-            Ok(0) => Err(UnbrkError::Timeout {
-                stage,
-                operation,
-                timeout: self.config.prompt_timeout,
-                recent_console: self.console_tail(),
-            }),
+            Ok(0) => {
+                *waited += chunk;
+                self.timeout_or_heartbeat(stage, operation, *waited)
+            }
             Ok(read_len) => {
                 self.console.extend_from_slice(&scratch[..read_len]);
                 Ok(())
             }
             Err(source) if source.kind() == std::io::ErrorKind::TimedOut => {
-                Err(UnbrkError::Timeout {
-                    stage,
-                    operation,
-                    timeout: self.config.prompt_timeout,
-                    recent_console: self.console_tail(),
-                })
+                *waited += chunk;
+                self.timeout_or_heartbeat(stage, operation, *waited)
             }
             Err(source) => Err(UnbrkError::Serial {
                 operation: "reading recovery console output",
                 source,
             }),
         }
+    }
+
+    /// Returns a `Timeout` error when accumulated wait time has reached
+    /// the configured prompt timeout, or emits a `PromptWaiting` heartbeat
+    /// event when there is still time remaining.
+    fn timeout_or_heartbeat(
+        &mut self,
+        stage: RecoveryStage,
+        operation: &'static str,
+        waited: Duration,
+    ) -> Result<(), UnbrkError> {
+        if waited >= self.config.prompt_timeout {
+            return Err(UnbrkError::Timeout {
+                stage,
+                operation,
+                timeout: self.config.prompt_timeout,
+                recent_console: self.console_tail(),
+            });
+        }
+        self.emit(EventPayload::PromptWaiting {
+            stage,
+            elapsed_secs: waited.as_secs(),
+            timeout_secs: self.config.prompt_timeout.as_secs(),
+        });
+        Ok(())
     }
 
     fn console_tail(&self) -> ConsoleTail {

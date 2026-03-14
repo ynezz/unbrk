@@ -1145,13 +1145,23 @@ impl FancyProgressRenderer {
         renderer.set_waiting_message(if plan.args.resume_from_uboot {
             "Waiting for live U-Boot prompt"
         } else {
-            "Waiting for recovery mode"
+            "Waiting for recovery prompt (power-cycle the board into recovery mode)"
         });
         renderer
     }
 
     fn observe(&self, event: &Event) {
         match &event.payload {
+            EventPayload::PromptWaiting {
+                stage,
+                elapsed_secs,
+                timeout_secs,
+            } => {
+                self.set_waiting(format!(
+                    "Waiting for {}... ({elapsed_secs}s/{timeout_secs}s)",
+                    prompt_waiting_label(*stage)
+                ));
+            }
             EventPayload::PromptSeen {
                 stage: RecoveryStage::PreloaderPrompt,
                 ..
@@ -1328,6 +1338,16 @@ const fn stage_label(stage: TransferStage) -> &'static str {
     }
 }
 
+const fn prompt_waiting_label(stage: RecoveryStage) -> &'static str {
+    match stage {
+        RecoveryStage::Bootrom => "the bootrom prompt",
+        RecoveryStage::PreloaderPrompt => "the recovery prompt",
+        RecoveryStage::FipPrompt => "the FIP prompt",
+        RecoveryStage::UBoot => "the U-Boot prompt",
+        RecoveryStage::FlashPlan => "the flash plan prompt",
+    }
+}
+
 fn transfer_message(
     stage: TransferStage,
     bytes_sent: u64,
@@ -1463,6 +1483,14 @@ impl PlainProgressRenderer {
             EventPayload::SessionStarted { .. }
             | EventPayload::PortOpened { .. }
             | EventPayload::UBootCommandCompleted { .. } => None,
+            EventPayload::PromptWaiting {
+                stage,
+                elapsed_secs,
+                timeout_secs,
+            } => Some(format!(
+                "Still waiting for {}... ({elapsed_secs}s/{timeout_secs}s)",
+                prompt_waiting_label(*stage)
+            )),
             EventPayload::PromptSeen {
                 stage: RecoveryStage::PreloaderPrompt,
                 ..
@@ -1591,6 +1619,12 @@ fn recover_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile
             "Images: preloader={}, FIP={}.",
             display_optional_path(plan.args.preloader.as_deref()),
             display_optional_path(plan.args.fip.as_deref()),
+        ));
+        lines.push(String::from(
+            "Waiting for the recovery prompt. If the board is not already in recovery mode,",
+        ));
+        lines.push(String::from(
+            "power it off, hold the reset button, and power on while holding the button.",
         ));
     }
 
@@ -2730,7 +2764,10 @@ mod tests {
         );
         let renderer = FancyProgressRenderer::new(&plan);
 
-        assert_eq!(renderer.bar.message(), "Waiting for recovery mode");
+        assert_eq!(
+            renderer.bar.message(),
+            "Waiting for recovery prompt (power-cycle the board into recovery mode)"
+        );
 
         renderer.observe(&fixture_event(
             1,
