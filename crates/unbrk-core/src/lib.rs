@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod event;
+pub mod flash;
 pub mod prompt;
 pub mod recovery;
 pub mod target;
@@ -13,6 +14,7 @@ pub use event::{
     EVENT_SCHEMA_VERSION, Event, EventKind, EventPayload, FailureClass, ImageKind, RecoveryStage,
     TransferStage,
 };
+pub use flash::{DEFAULT_RESET_TIMEOUT, FlashConfig, FlashReport, flash_from_uboot};
 pub use prompt::{PromptMatch, advance_to_prompt, find_prompt};
 pub use recovery::{
     DEFAULT_PROMPT_TIMEOUT, RecoveryConfig, RecoveryImages, RecoveryReport, RecoveryState,
