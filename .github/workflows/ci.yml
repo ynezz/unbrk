@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Ensure pinned Rust toolchain is active
+        run: rustup show active-toolchain
+
+      - name: Install CI cargo tools
+        run: |
+          cargo install --locked cargo-deny
+          cargo install --locked cargo-nextest
+          cargo install --locked typos-cli
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run test suite
+        run: cargo nextest run --workspace
+
+      - name: Run doc tests
+        run: cargo test --doc --workspace
+
+      - name: Check dependency policy
+        run: cargo deny check
+
+      - name: Run typos
+        run: typos
