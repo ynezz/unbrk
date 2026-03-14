@@ -9,7 +9,7 @@ use crate::target::{FlashPlan, TargetProfile, WriteStage};
 use crate::transport::Transport;
 use crate::uboot::{
     DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, UBootCommandOutput, parse_filesize,
-    parse_loadaddr, parse_mmc_erase_success, parse_mmc_write_success, parse_total_size,
+    parse_loadaddr, parse_mmc_erase_success, parse_mmc_write_success, parse_optional_total_size,
     run_command,
 };
 use crate::xmodem::{
@@ -151,6 +151,12 @@ struct PreparedStage {
     payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TotalSizeVerification {
+    Verified,
+    Skipped,
+}
+
 struct FlashRunner<'a, T> {
     transport: &'a mut T,
     target: TargetProfile,
@@ -239,8 +245,14 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
             self.run_loadx_transfer(transfer_stage, stage.image_path.as_path(), payload)?;
 
         let output = UBootCommandOutput::new(self.console[command_start..].to_vec());
-        Self::verify_total_size(stage.image, payload, &output)?;
-        self.emit_command_completed(loadx_command.as_str(), "loadx completed");
+        let total_size = Self::verify_total_size(stage.image, payload, &output)?;
+        self.emit_command_completed(
+            loadx_command.as_str(),
+            match total_size {
+                TotalSizeVerification::Verified => "loadx completed",
+                TotalSizeVerification::Skipped => "loadx completed; Total Size summary absent",
+            },
+        );
 
         let filesize_output = self.run_uboot_command("printenv filesize")?;
         let observed_size = parse_filesize(&filesize_output)?;
@@ -364,13 +376,13 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         image: ImageKind,
         payload: &[u8],
         output: &UBootCommandOutput,
-    ) -> Result<(), UnbrkError> {
-        let Ok(total_size) = parse_total_size(output) else {
-            return Ok(());
+    ) -> Result<TotalSizeVerification, UnbrkError> {
+        let Some(total_size) = parse_optional_total_size(output)? else {
+            return Ok(TotalSizeVerification::Skipped);
         };
         let expected_bytes = u64::try_from(payload.len()).unwrap_or(u64::MAX);
         if total_size.decimal_bytes == expected_bytes && total_size.hex_bytes == expected_bytes {
-            return Ok(());
+            return Ok(TotalSizeVerification::Verified);
         }
 
         Err(UnbrkError::VerificationMismatch {
@@ -698,6 +710,66 @@ mod tests {
     }
 
     #[test]
+    fn reports_when_loadx_total_size_summary_is_absent() {
+        let preloader = temp_file_with_bytes(&[0x11, 0x22, 0x33, 0x44]);
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
+        let mut transport = scripted_flash_transport_with_loadx_outputs(
+            build_crc_packet(1, &[0x11, 0x22, 0x33, 0x44]),
+            build_crc_packet(1, &[0xaa, 0xbb, 0xcc, 0xdd]),
+            vec![XMODEM_ACK],
+            b"\r\nAN7581> ".to_vec(),
+            b"\r\nAN7581> ".to_vec(),
+            fixture_reset_evidence(),
+        );
+
+        let report = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap();
+
+        assert!(report.events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayload::UBootCommandCompleted { command, summary, .. }
+                if command == "loadx $loadaddr 115200"
+                    && summary.as_deref() == Some("loadx completed; Total Size summary absent")
+        )));
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn malformed_total_size_summary_is_a_protocol_error() {
+        let preloader = temp_file_with_bytes(&[0x11, 0x22, 0x33, 0x44]);
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
+        let mut transport = scripted_flash_transport_with_loadx_outputs(
+            build_crc_packet(1, &[0x11, 0x22, 0x33, 0x44]),
+            build_crc_packet(1, &[0xaa, 0xbb, 0xcc, 0xdd]),
+            vec![XMODEM_ACK],
+            b"\r\nTotal Size = nope\r\nAN7581> ".to_vec(),
+            b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec(),
+            fixture_reset_evidence(),
+        );
+
+        let error = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse loadx total size")
+        );
+    }
+
+    #[test]
     fn validates_images_before_erasing_flash() {
         let preloader = temp_file_with_size(129_025);
         let fip = temp_file_with_size(4);
@@ -807,6 +879,24 @@ mod tests {
         preloader_eot_reply: Vec<u8>,
         reset_output: Vec<u8>,
     ) -> MockTransport {
+        scripted_flash_transport_with_loadx_outputs(
+            preloader_packet,
+            fip_packet,
+            preloader_eot_reply,
+            b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec(),
+            b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec(),
+            reset_output,
+        )
+    }
+
+    fn scripted_flash_transport_with_loadx_outputs(
+        preloader_packet: Vec<u8>,
+        fip_packet: Vec<u8>,
+        preloader_eot_reply: Vec<u8>,
+        preloader_loadx_output: Vec<u8>,
+        fip_loadx_output: Vec<u8>,
+        reset_output: Vec<u8>,
+    ) -> MockTransport {
         MockTransport::new([
             MockStep::SetTimeout(COMMAND_TIMEOUT),
             MockStep::Write(vec![b'\r']),
@@ -837,7 +927,7 @@ mod tests {
             MockStep::Flush,
             MockStep::Read(preloader_eot_reply),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
+            MockStep::Read(preloader_loadx_output),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
             MockStep::Write(b"printenv filesize\n".to_vec()),
             MockStep::Flush,
@@ -861,7 +951,7 @@ mod tests {
             MockStep::Flush,
             MockStep::Read(vec![XMODEM_ACK]),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
+            MockStep::Read(fip_loadx_output),
             MockStep::SetTimeout(COMMAND_TIMEOUT),
             MockStep::Write(b"printenv filesize\n".to_vec()),
             MockStep::Flush,

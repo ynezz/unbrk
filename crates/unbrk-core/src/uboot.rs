@@ -229,15 +229,22 @@ pub fn parse_mmc_write_success(output: &UBootCommandOutput) -> Result<MmcWriteSu
 ///
 /// # Errors
 ///
-/// Returns a protocol error when the output does not contain a parseable
-/// `Total Size` summary.
-pub fn parse_total_size(output: &UBootCommandOutput) -> Result<TransferSize, UnbrkError> {
+/// Returns `Ok(None)` when the command output omits the optional `Total Size`
+/// summary and a protocol error when the summary is present but malformed.
+pub fn parse_optional_total_size(
+    output: &UBootCommandOutput,
+) -> Result<Option<TransferSize>, UnbrkError> {
     let regex = Regex::new(r"Total Size\s*=\s*0x([0-9a-fA-F]+)\s*=\s*([0-9]+)\s*Bytes")
         .expect("static Total Size regex is valid");
     let text = output.as_lossy_str();
-    let captures = regex
-        .captures(text.as_str())
-        .ok_or_else(|| missing_output_error(output, "loadx total size"))?;
+
+    if !text.contains("Total Size") {
+        return Ok(None);
+    }
+
+    let captures = regex.captures(text.as_str()).ok_or_else(|| {
+        malformed_output_error(output, "loadx total size", &"missing expected fields")
+    })?;
 
     let hex_bytes = u64::from_str_radix(captures.get(1).expect("capture exists").as_str(), 16)
         .map_err(|error| malformed_output_error(output, "loadx total size hex", &error))?;
@@ -248,10 +255,25 @@ pub fn parse_total_size(output: &UBootCommandOutput) -> Result<TransferSize, Unb
         .parse::<u64>()
         .map_err(|error| malformed_output_error(output, "loadx total size decimal", &error))?;
 
-    Ok(TransferSize {
+    Ok(Some(TransferSize {
         hex_bytes,
         decimal_bytes,
-    })
+    }))
+}
+
+/// Parses the `Total Size = 0x... = ... Bytes` summary from `loadx`.
+///
+/// # Panics
+///
+/// Panics only if the hard-coded `Total Size` regex is invalid.
+///
+/// # Errors
+///
+/// Returns a protocol error when the output does not contain a parseable
+/// `Total Size` summary.
+pub fn parse_total_size(output: &UBootCommandOutput) -> Result<TransferSize, UnbrkError> {
+    parse_optional_total_size(output)?
+        .ok_or_else(|| missing_output_error(output, "loadx total size"))
 }
 
 fn prompt_search_cursor(regex: &BytesRegex, output: &[u8]) -> usize {
@@ -354,7 +376,7 @@ mod tests {
     use super::{
         DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, MAX_COMMAND_OUTPUT_BYTES, TransferSize,
         UBootCommandOutput, parse_filesize, parse_loadaddr, parse_mmc_erase_success,
-        parse_mmc_write_success, parse_total_size, run_command,
+        parse_mmc_write_success, parse_optional_total_size, parse_total_size, run_command,
     };
     use crate::target::AN7581;
     use crate::transport::{MockStep, MockTransport};
@@ -494,6 +516,26 @@ mod tests {
                 hex_bytes: 0x1f400,
                 decimal_bytes: 128_000,
             }
+        );
+    }
+
+    #[test]
+    fn parse_optional_total_size_returns_none_when_summary_is_absent() {
+        let output =
+            UBootCommandOutput::new(b"xyzModem - CRC mode, 1024(SOH)/1024(STX) bytes\r\n".to_vec());
+
+        assert_eq!(parse_optional_total_size(&output).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_optional_total_size_rejects_malformed_summary_lines() {
+        let output = UBootCommandOutput::new(b"Total Size = nope\r\n".to_vec());
+        let error = parse_optional_total_size(&output).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse loadx total size")
         );
     }
 
