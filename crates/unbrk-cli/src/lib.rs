@@ -869,7 +869,6 @@ impl ResolvedProgressMode {
 struct TerminalStatus {
     stdin_is_tty: bool,
     stdout_is_tty: bool,
-    stderr_is_tty: bool,
 }
 
 impl TerminalStatus {
@@ -877,7 +876,6 @@ impl TerminalStatus {
         Self {
             stdin_is_tty: io::stdin().is_terminal(),
             stdout_is_tty: io::stdout().is_terminal(),
-            stderr_is_tty: io::stderr().is_terminal(),
         }
     }
 }
@@ -1067,7 +1065,6 @@ mod tests {
         TerminalStatus {
             stdin_is_tty: stdout_is_tty,
             stdout_is_tty,
-            stderr_is_tty: stdout_is_tty,
         }
     }
 
