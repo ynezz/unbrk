@@ -388,11 +388,16 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         if total_size.decimal_bytes == expected_bytes && total_size.hex_bytes == expected_bytes {
             return Ok(TotalSizeVerification::Verified);
         }
+        let observed_bytes = if total_size.hex_bytes == expected_bytes {
+            total_size.decimal_bytes
+        } else {
+            total_size.hex_bytes
+        };
 
         Err(UnbrkError::VerificationMismatch {
             image,
             expected_bytes,
-            observed_bytes: total_size.decimal_bytes,
+            observed_bytes,
             recent_console: ConsoleTail::from_buffer(output.as_bytes()),
         })
     }
@@ -664,10 +669,11 @@ fn file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{FlashConfig, flash_from_uboot};
+    use crate::error::UnbrkError;
     use crate::event::{EventPayload, ImageKind, TransferStage};
     use crate::target::AN7581;
     use crate::transport::{MockStep, MockTransport, Transport};
-    use crate::uboot::LoadAddr;
+    use crate::uboot::{LoadAddr, UBootCommandOutput};
     use crate::xmodem::{XMODEM_ACK, XMODEM_NAK, XmodemConfig, build_crc_packet};
     use std::fs::{self, File};
     use std::io;
@@ -783,6 +789,60 @@ mod tests {
                 .to_string()
                 .contains("failed to parse loadx total size")
         );
+    }
+
+    #[test]
+    fn total_size_verification_reports_the_hex_count_when_only_hex_disagrees() {
+        let output = UBootCommandOutput::new(b"Total Size = 0x5 = 4 Bytes\r\nAN7581> ".to_vec());
+
+        let error = super::FlashRunner::<MockTransport>::verify_total_size(
+            ImageKind::Preloader,
+            &[0x11, 0x22, 0x33, 0x44],
+            &output,
+        )
+        .unwrap_err();
+
+        match error {
+            UnbrkError::VerificationMismatch {
+                image,
+                expected_bytes,
+                observed_bytes,
+                recent_console,
+            } => {
+                assert_eq!(image, ImageKind::Preloader);
+                assert_eq!(expected_bytes, 4);
+                assert_eq!(observed_bytes, 5);
+                assert!(recent_console.as_lossy_str().contains("0x5 = 4 Bytes"));
+            }
+            other => panic!("expected verification mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn total_size_verification_reports_the_decimal_count_when_only_decimal_disagrees() {
+        let output = UBootCommandOutput::new(b"Total Size = 0x4 = 5 Bytes\r\nAN7581> ".to_vec());
+
+        let error = super::FlashRunner::<MockTransport>::verify_total_size(
+            ImageKind::Fip,
+            &[0xaa, 0xbb, 0xcc, 0xdd],
+            &output,
+        )
+        .unwrap_err();
+
+        match error {
+            UnbrkError::VerificationMismatch {
+                image,
+                expected_bytes,
+                observed_bytes,
+                recent_console,
+            } => {
+                assert_eq!(image, ImageKind::Fip);
+                assert_eq!(expected_bytes, 4);
+                assert_eq!(observed_bytes, 5);
+                assert!(recent_console.as_lossy_str().contains("0x4 = 5 Bytes"));
+            }
+            other => panic!("expected verification mismatch, got {other:?}"),
+        }
     }
 
     #[test]
