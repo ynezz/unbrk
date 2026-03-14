@@ -2,7 +2,8 @@
 
 use crate::error::{ConsoleTail, UnbrkError};
 use crate::event::{Event, EventPayload, ImageKind, RecoveryStage, TransferStage};
-use crate::target::{FlashPlan, PromptPattern, TargetProfile, WriteStage};
+use crate::prompt::{PromptMatch, advance_to_prompt_allowing_trailing_space};
+use crate::target::{FlashPlan, TargetProfile, WriteStage};
 use crate::transport::Transport;
 use crate::uboot::{
     DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, UBootCommandOutput, parse_filesize,
@@ -409,6 +410,9 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 
     fn reset_and_wait(&mut self) -> Result<String, UnbrkError> {
+        self.emit(EventPayload::UBootCommandStarted {
+            command: String::from("reset"),
+        });
         self.transport
             .set_timeout(self.config.reset_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -439,9 +443,12 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
             })?;
 
         loop {
-            if let Some(prompt) =
-                advance_to_uboot_prompt(self.target.prompts.uboot, &self.console, &mut self.cursor)
-                    .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?
+            if let Some(prompt) = advance_to_prompt_allowing_trailing_space(
+                self.target.prompts.uboot,
+                &self.console,
+                &mut self.cursor,
+            )
+            .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?
             {
                 return Ok(prompt);
             }
@@ -474,7 +481,6 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     fn read_reset_evidence(&mut self, operation: &'static str) -> Result<String, UnbrkError> {
         let regex = Regex::new(RESET_EVIDENCE_PATTERN)
             .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::FlashPlan))?;
-        let evidence_start = self.cursor;
 
         loop {
             if let Some(bytes) = self.console.get(self.cursor..)
@@ -494,13 +500,6 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
                 operation,
                 self.config.reset_timeout,
             )?;
-            if evidence_start > self.console.len() {
-                return Err(UnbrkError::Protocol {
-                    stage: RecoveryStage::FlashPlan,
-                    detail: String::from("reset evidence cursor moved past console"),
-                    recent_console: self.console_tail(),
-                });
-            }
         }
     }
 
@@ -586,36 +585,6 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromptMatch {
-    prompt: String,
-}
-
-fn advance_to_uboot_prompt(
-    pattern: PromptPattern,
-    buffer: &[u8],
-    cursor: &mut usize,
-) -> Result<Option<PromptMatch>, regex::Error> {
-    let Some(bytes) = buffer.get(*cursor..) else {
-        return Ok(None);
-    };
-    let regex = Regex::new(pattern.as_str())?;
-
-    for matched in regex.find_iter(bytes) {
-        let trailing = bytes.get(matched.end()).copied();
-        if trailing.is_none_or(|byte| byte.is_ascii_control() || byte == b' ') {
-            let prompt = PromptMatch {
-                prompt: String::from_utf8_lossy(&bytes[matched.start()..matched.end()])
-                    .into_owned(),
-            };
-            *cursor += matched.end();
-            return Ok(Some(prompt));
-        }
-    }
-
-    Ok(None)
-}
-
 fn read_image(path: &Path, image: ImageKind) -> Result<Vec<u8>, UnbrkError> {
     fs::read(path).map_err(|error| UnbrkError::BadInput {
         message: format!(
@@ -687,6 +656,10 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, EventPayload::ResetSeen { .. }))
         );
+        assert!(report.events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayload::UBootCommandStarted { command } if command == "reset"
+        )));
         transport.assert_finished();
     }
 

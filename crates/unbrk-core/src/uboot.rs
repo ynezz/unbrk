@@ -2,9 +2,10 @@
 
 use crate::error::{ConsoleTail, UnbrkError};
 use crate::event::RecoveryStage;
+use crate::prompt::find_prompt_allowing_trailing_space;
 use crate::target::PromptPattern;
 use crate::transport::Transport;
-use regex::{Regex, bytes::Regex as BytesRegex};
+use regex::Regex;
 use std::time::Duration;
 
 /// Default timeout for one U-Boot command round-trip.
@@ -148,7 +149,7 @@ pub fn run_command(
 
         let search_cursor =
             prompt_search_cursor(prompt, &output).map_err(|error| compile_prompt_error(&error))?;
-        if find_uboot_prompt(prompt, &output, search_cursor)
+        if find_prompt_allowing_trailing_space(prompt, &output, search_cursor)
             .map_err(|error| compile_prompt_error(&error))?
             .is_some()
         {
@@ -247,35 +248,15 @@ fn prompt_search_cursor(prompt: PromptPattern, output: &[u8]) -> Result<usize, r
         return Ok(0);
     };
 
-    let Some(first_prompt_end) = find_uboot_prompt(prompt, output, 0)? else {
+    let Some(first_prompt) = find_prompt_allowing_trailing_space(prompt, output, 0)? else {
         return Ok(0);
     };
 
-    if first_prompt_end <= line_end {
+    if first_prompt.next_cursor <= line_end {
         Ok(line_end)
     } else {
         Ok(0)
     }
-}
-
-fn find_uboot_prompt(
-    prompt: PromptPattern,
-    output: &[u8],
-    cursor: usize,
-) -> Result<Option<usize>, regex::Error> {
-    let Some(bytes) = output.get(cursor..) else {
-        return Ok(None);
-    };
-    let regex = BytesRegex::new(prompt.as_str())?;
-
-    for matched in regex.find_iter(bytes) {
-        let trailing = bytes.get(matched.end()).copied();
-        if trailing.is_none_or(|byte| byte.is_ascii_control() || byte == b' ') {
-            return Ok(Some(cursor + matched.end()));
-        }
-    }
-
-    Ok(None)
 }
 
 fn first_line_end(bytes: &[u8]) -> Option<usize> {

@@ -20,6 +20,32 @@ impl PromptMatch {
     }
 }
 
+fn find_prompt_impl(
+    pattern: PromptPattern,
+    buffer: &[u8],
+    cursor: usize,
+    allow_trailing_space: bool,
+) -> Result<Option<PromptMatch>, RegexError> {
+    let Some(bytes) = buffer.get(cursor..) else {
+        return Ok(None);
+    };
+    let regex = Regex::new(pattern.as_str())?;
+
+    for matched in regex.find_iter(bytes) {
+        let trailing = bytes.get(matched.end()).copied();
+        if trailing
+            .is_none_or(|byte| byte.is_ascii_control() || (allow_trailing_space && byte == b' '))
+        {
+            return Ok(Some(PromptMatch::new(
+                &bytes[matched.start()..matched.end()],
+                cursor + matched.end(),
+            )));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Finds the next stage-local prompt match from `cursor`.
 ///
 /// The matcher accepts the first regex hit whose trailing byte is either absent
@@ -35,22 +61,23 @@ pub fn find_prompt(
     buffer: &[u8],
     cursor: usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
-    let Some(bytes) = buffer.get(cursor..) else {
-        return Ok(None);
-    };
-    let regex = Regex::new(pattern.as_str())?;
+    find_prompt_impl(pattern, buffer, cursor, false)
+}
 
-    for matched in regex.find_iter(bytes) {
-        let trailing = bytes.get(matched.end()).copied();
-        if trailing.is_none_or(|byte| byte.is_ascii_control()) {
-            return Ok(Some(PromptMatch::new(
-                &bytes[matched.start()..matched.end()],
-                cursor + matched.end(),
-            )));
-        }
-    }
-
-    Ok(None)
+/// Finds the next prompt match from `cursor`, also accepting a trailing space.
+///
+/// U-Boot prompts commonly render as `AN7581> `, so callers that wait for the
+/// live shell prompt need to tolerate a single ASCII space after the regex hit.
+///
+/// # Errors
+///
+/// Returns a regex compilation error when the prompt source is invalid.
+pub fn find_prompt_allowing_trailing_space(
+    pattern: PromptPattern,
+    buffer: &[u8],
+    cursor: usize,
+) -> Result<Option<PromptMatch>, RegexError> {
+    find_prompt_impl(pattern, buffer, cursor, true)
 }
 
 /// Advances `cursor` past the next matched prompt if one is present.
@@ -72,9 +99,31 @@ pub fn advance_to_prompt(
     Ok(matched)
 }
 
+/// Advances `cursor` past the next matched prompt, allowing a trailing space.
+///
+/// # Errors
+///
+/// Returns a regex compilation error when the prompt source is invalid.
+pub fn advance_to_prompt_allowing_trailing_space(
+    pattern: PromptPattern,
+    buffer: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<PromptMatch>, RegexError> {
+    let matched = find_prompt_allowing_trailing_space(pattern, buffer, *cursor)?;
+
+    if let Some(ref matched) = matched {
+        *cursor = matched.next_cursor;
+    }
+
+    Ok(matched)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PromptMatch, advance_to_prompt, find_prompt};
+    use super::{
+        PromptMatch, advance_to_prompt, advance_to_prompt_allowing_trailing_space, find_prompt,
+        find_prompt_allowing_trailing_space,
+    };
     use crate::target::AN7581;
 
     const STAGE1_PROMPT: &[u8] =
@@ -146,6 +195,16 @@ mod tests {
     }
 
     #[test]
+    fn uboot_prompt_matching_accepts_a_trailing_space() {
+        let matched = find_prompt_allowing_trailing_space(AN7581.prompts.uboot, b"AN7581> ", 0)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(matched.prompt, "AN7581>");
+        assert_eq!(matched.next_cursor, 7);
+    }
+
+    #[test]
     fn cursor_advancement_skips_stale_prompt_text() {
         let mut combined = Vec::new();
         combined.extend_from_slice(STAGE1_PROMPT);
@@ -164,5 +223,20 @@ mod tests {
             .unwrap();
         assert_eq!(second.prompt, "Press x to load BL31 + U-Boot FIP");
         assert_eq!(cursor, STAGE1_PROMPT.len() + b"DRAM init\r\n".len() + 33);
+    }
+
+    #[test]
+    fn cursor_advancement_for_uboot_prompt_stops_before_the_trailing_space() {
+        let mut cursor = 0;
+        let matched = advance_to_prompt_allowing_trailing_space(
+            AN7581.prompts.uboot,
+            b"AN7581> \r\n",
+            &mut cursor,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(matched.prompt, "AN7581>");
+        assert_eq!(cursor, 7);
     }
 }

@@ -2,13 +2,12 @@
 
 use crate::error::{ConsoleTail, UnbrkError};
 use crate::event::{Event, EventPayload, RecoveryStage, TransferStage};
-use crate::prompt::{PromptMatch, advance_to_prompt};
+use crate::prompt::{PromptMatch, advance_to_prompt, advance_to_prompt_allowing_trailing_space};
 use crate::target::{PromptPattern, TargetProfile};
 use crate::transport::Transport;
 use crate::xmodem::{
     CrcReadyMatch, XmodemConfig, XmodemTransferReport, advance_to_crc_ready, send_crc,
 };
-use regex::bytes::Regex;
 use std::time::Duration;
 
 /// Default prompt timeout for each recovery state.
@@ -388,8 +387,9 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
             })?;
 
         loop {
-            if let Some(prompt) = advance_to_uboot_prompt(pattern, &self.console, &mut self.cursor)
-                .map_err(|error| Self::invalid_prompt_regex(&error))?
+            if let Some(prompt) =
+                advance_to_prompt_allowing_trailing_space(pattern, &self.console, &mut self.cursor)
+                    .map_err(|error| Self::invalid_prompt_regex(&error))?
             {
                 return Ok(prompt);
             }
@@ -477,32 +477,6 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
             recent_console: self.console_tail(),
         }
     }
-}
-
-fn advance_to_uboot_prompt(
-    pattern: PromptPattern,
-    buffer: &[u8],
-    cursor: &mut usize,
-) -> Result<Option<PromptMatch>, regex::Error> {
-    let Some(bytes) = buffer.get(*cursor..) else {
-        return Ok(None);
-    };
-    let regex = Regex::new(pattern.as_str())?;
-
-    for matched in regex.find_iter(bytes) {
-        let trailing = bytes.get(matched.end()).copied();
-        if trailing.is_none_or(|byte| byte.is_ascii_control() || byte == b' ') {
-            let prompt = PromptMatch {
-                prompt: String::from_utf8_lossy(&bytes[matched.start()..matched.end()])
-                    .into_owned(),
-                next_cursor: *cursor + matched.end(),
-            };
-            *cursor = prompt.next_cursor;
-            return Ok(Some(prompt));
-        }
-    }
-
-    Ok(None)
 }
 
 #[cfg(test)]
