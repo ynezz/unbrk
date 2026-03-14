@@ -136,7 +136,7 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` - be
 | Mail `thread_id` | `br-###` |
 | Mail subject | `[br-###] ...` |
 | File reservation `reason` | `br-###` |
-| Commit messages | Include `br-###` for traceability |
+| Git trailer | `References: br-###` (or `Fixes:`/`Closes:`) |
 
 ---
 
@@ -242,10 +242,17 @@ Agents are expected to commit their changes after completing each task or logica
   - Avoid one `-m` per wrapped line (that inserts blank lines); use a
     single body with embedded newlines or a message file instead
   - Commit subject should include `prefix: ...` that matches the
-    top-level tree/area being changed
+    top-level tree/area being changed — **NEVER put bead/issue IDs
+    in the subject line**
     - Makefile: ...
     - tools: ...
     - AGENTS: ...
+    - crates: ...
+  - Link bead IDs using **git trailers** at the end of the commit
+    message body (after a blank line), e.g.:
+    - `References: br-123` — related work
+    - `Fixes: br-123` — this commit fixes the issue
+    - `Closes: br-123` — this commit completes the issue
   - Commit description should include:
     - what is currently wrong/missing
     - why is this change needed
