@@ -3,6 +3,7 @@
 pub mod error;
 pub mod event;
 pub mod prompt;
+pub mod recovery;
 pub mod target;
 pub mod transport;
 pub mod uboot;
@@ -13,6 +14,10 @@ pub use event::{
     TransferStage,
 };
 pub use prompt::{PromptMatch, advance_to_prompt, find_prompt};
+pub use recovery::{
+    DEFAULT_PROMPT_TIMEOUT, RecoveryConfig, RecoveryImages, RecoveryReport, RecoveryState,
+    recover_to_uboot,
+};
 pub use transport::{DEFAULT_BAUD_RATE, MockStep, MockTransport, SerialTransport, Transport};
 pub use uboot::{
     DEFAULT_COMMAND_TIMEOUT, FileSize, LoadAddr, MmcEraseSuccess, MmcWriteSuccess, TransferSize,
