@@ -19,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unbrk_core::error::{ConsoleTail, UnbrkError};
 use unbrk_core::event::{
     EVENT_SCHEMA_VERSION, Event, EventPayload, FailureClass, ImageKind, RecoveryStage,
@@ -247,6 +247,7 @@ fn run_recover(
         .map_err(|source| stderr_io_error("writing the resume-from-uboot warning", &source))?;
     }
 
+    let session_start = Instant::now();
     let port = recover_port(plan)?;
     let target = target_profile(&plan.args);
     let mut events = Vec::new();
@@ -325,6 +326,7 @@ fn run_recover(
             port.as_str(),
             outcome,
             console_handoff_completed,
+            session_start.elapsed(),
         )?;
     }
 
@@ -1633,13 +1635,13 @@ static EMOJI_TIMER: Emoji<'_, '_> = Emoji("⏱  ", "");
 static EMOJI_MONITOR: Emoji<'_, '_> = Emoji("🖥  ", "");
 static EMOJI_RESUME: Emoji<'_, '_> = Emoji("🔄 ", "");
 const FANCY_UNBRK_LOGO_LINES: [&str; 5] = [
-    "▐▌  ▐▌ ▐▌  ▐▌ ▐████▖ ▐████▖ ▐▌  ▗▌",
-    "▐▌  ▐▌ ▐█▌ ▐▌ ▐▌  ▜▌ ▐▌  ▜▌ ▐▌ ▗▛ ",
-    "▐▌  ▐▌ ▐▌█▐▌ ▐████▘ ▐████▘ ▐████ ",
-    "▐▌  ▐▌ ▐▌ ▜█▌ ▐▌  ▜▌ ▐▌▜▌   ▐▌ ▝▜▖",
-    " ▜▄▄▛  ▐▌  ▜▌ ▐████▘ ▐▌ ▝▜▖ ▐▌  ▝▜",
+    "▐▌    ▐▌ ▐▌   ▐▌ ▐█████▖ ▐█████▖ ▐▌   ▗▛",
+    "▐▌    ▐▌ ▐██▖ ▐▌ ▐▌   ▜▌ ▐▌   ▜▌ ▐▌ ▗▄▛ ",
+    "▐▌    ▐▌ ▐▌▜█▖▐▌ ▐█████▘ ▐█████▘ ▐████▖ ",
+    "▐▌    ▐▌ ▐▌ ▜█▙▌ ▐▌   ▜▌ ▐▌ ▜▙   ▐▌  ▝█▖",
+    " ▜▆▄▄▆▛  ▐▌  ▝▀▌ ▐█████▘ ▐▌  ▝▜▖ ▐▌   ▝▜",
 ];
-const FANCY_UNBRK_LOGO_GRADIENT: [u8; 5] = [231, 159, 117, 75, 33];
+const FANCY_UNBRK_LOGO_GRADIENT: [u8; 5] = [255, 195, 159, 81, 39];
 
 /// Build a styled label for the startup banner (bold cyan, right-aligned).
 fn banner_label(text: &str) -> String {
@@ -2006,10 +2008,13 @@ fn write_recover_summary(
     port: &str,
     outcome: &RecoverOutcome,
     console_handoff_completed: bool,
+    elapsed: Duration,
 ) -> Result<(), RunError> {
+    static EMOJI_STAR: Emoji<'_, '_> = Emoji("\u{2b50} ", "* ");
     writeln!(
         stdout,
-        "Recovery finished on {port} at {} baud.",
+        "{EMOJI_STAR}Recovery completed in {} on {port} at {} baud.",
+        HumanDuration(elapsed),
         plan.args.baud,
     )
     .map_err(|source| stdout_io_error("writing the recovery summary header", &source))?;
@@ -3160,10 +3165,18 @@ mod tests {
         );
         let mut stdout = Vec::new();
 
-        write_recover_summary(&mut stdout, &plan, PORT, &RecoverOutcome::Recovered, true).unwrap();
+        write_recover_summary(
+            &mut stdout,
+            &plan,
+            PORT,
+            &RecoverOutcome::Recovered,
+            true,
+            Duration::from_secs(42),
+        )
+        .unwrap();
 
         let rendered = String::from_utf8(stdout).unwrap();
-        assert!(rendered.contains("Recovery finished on"));
+        assert!(rendered.contains("Recovery completed in"));
         assert!(rendered.contains("Interactive console handoff ended"));
         assert!(!rendered.contains("progress mode"));
     }
@@ -3718,9 +3731,15 @@ mod tests {
             tty_status(false),
         );
         let mut stdout = BrokenWriter;
-        let error =
-            write_recover_summary(&mut stdout, &plan, PORT, &RecoverOutcome::Recovered, false)
-                .unwrap_err();
+        let error = write_recover_summary(
+            &mut stdout,
+            &plan,
+            PORT,
+            &RecoverOutcome::Recovered,
+            false,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
 
         match error {
             RunError::Io(error) => {
