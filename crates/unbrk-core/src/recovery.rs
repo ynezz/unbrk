@@ -5,11 +5,12 @@ use crate::event::{Event, EventPayload, RecoveryStage, TransferStage, timestamp_
 use crate::prompt::{
     PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex, advance_to_prompt_with_regex,
 };
-use crate::target::{PromptPattern, TargetProfile};
+use crate::target::TargetProfile;
 use crate::transport::Transport;
 use crate::xmodem::{
     CrcReadyMatch, XmodemConfig, XmodemTransferReport, advance_to_crc_ready, send_crc,
 };
+use regex::bytes::Regex;
 use std::time::Duration;
 
 /// Default prompt timeout for each recovery state.
@@ -84,11 +85,10 @@ pub fn recover_to_uboot(
     images: RecoveryImages<'_>,
     config: RecoveryConfig,
 ) -> Result<RecoveryReport, UnbrkError> {
-    let mut runner = RecoveryRunner::new(transport, target, config);
+    let mut runner = RecoveryRunner::new(transport, target, config)?;
 
     runner.push_state(RecoveryState::WaitForInitialPrompt);
     let initial_prompt = runner.read_stage_prompt(
-        target.prompts.initial_recovery,
         RecoveryStage::PreloaderPrompt,
         "the initial recovery prompt",
     )?;
@@ -119,7 +119,6 @@ pub fn recover_to_uboot(
     let preloader_result = runner.send_transfer(
         TransferStage::Preloader,
         images.preloader,
-        target.prompts.second_stage,
         RecoveryState::WaitForFipPrompt,
         WaitTarget::RecoveryPrompt {
             stage: RecoveryStage::FipPrompt,
@@ -133,11 +132,8 @@ pub fn recover_to_uboot(
 
     if !preloader_result.prompt_emitted {
         runner.push_state(RecoveryState::WaitForFipPrompt);
-        let second_prompt = runner.read_stage_prompt(
-            target.prompts.second_stage,
-            RecoveryStage::FipPrompt,
-            "the BL31 + U-Boot FIP prompt",
-        )?;
+        let second_prompt =
+            runner.read_stage_prompt(RecoveryStage::FipPrompt, "the BL31 + U-Boot FIP prompt")?;
         runner.emit(EventPayload::PromptSeen {
             stage: RecoveryStage::FipPrompt,
             prompt: second_prompt.prompt,
@@ -163,7 +159,6 @@ pub fn recover_to_uboot(
     let fip_result = runner.send_transfer(
         TransferStage::Fip,
         images.fip,
-        target.prompts.uboot,
         RecoveryState::WaitForUbootPrompt,
         WaitTarget::UBootPrompt {
             operation: "the RAM-resident U-Boot prompt",
@@ -172,8 +167,7 @@ pub fn recover_to_uboot(
 
     if !fip_result.prompt_emitted {
         runner.push_state(RecoveryState::WaitForUbootPrompt);
-        let uboot_prompt =
-            runner.read_uboot_prompt(target.prompts.uboot, "the RAM-resident U-Boot prompt")?;
+        let uboot_prompt = runner.read_uboot_prompt("the RAM-resident U-Boot prompt")?;
         runner.emit(EventPayload::UBootPromptSeen {
             prompt: uboot_prompt.prompt,
         });
@@ -210,6 +204,9 @@ enum WaitTarget {
 struct RecoveryRunner<'a, T> {
     transport: &'a mut T,
     config: RecoveryConfig,
+    initial_prompt_regex: Regex,
+    second_stage_prompt_regex: Regex,
+    uboot_prompt_regex: Regex,
     console: Vec<u8>,
     cursor: usize,
     events: Vec<Event>,
@@ -218,16 +215,35 @@ struct RecoveryRunner<'a, T> {
 }
 
 impl<'a, T: Transport> RecoveryRunner<'a, T> {
-    const fn new(transport: &'a mut T, _target: TargetProfile, config: RecoveryConfig) -> Self {
-        Self {
+    fn new(
+        transport: &'a mut T,
+        target: TargetProfile,
+        config: RecoveryConfig,
+    ) -> Result<Self, UnbrkError> {
+        Ok(Self {
             transport,
             config,
+            initial_prompt_regex: target
+                .prompts
+                .initial_recovery
+                .compile()
+                .map_err(|error| Self::invalid_prompt_regex(&error))?,
+            second_stage_prompt_regex: target
+                .prompts
+                .second_stage
+                .compile()
+                .map_err(|error| Self::invalid_prompt_regex(&error))?,
+            uboot_prompt_regex: target
+                .prompts
+                .uboot
+                .compile()
+                .map_err(|error| Self::invalid_prompt_regex(&error))?,
             console: Vec::new(),
             cursor: 0,
             events: Vec::new(),
             states: Vec::new(),
             next_sequence: 1,
-        }
+        })
     }
 
     fn push_state(&mut self, state: RecoveryState) {
@@ -259,7 +275,6 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
         &mut self,
         transfer_stage: TransferStage,
         payload: &[u8],
-        prompt_pattern: PromptPattern,
         wait_state: RecoveryState,
         wait_target: WaitTarget,
     ) -> Result<TransferOutcome, UnbrkError> {
@@ -300,10 +315,10 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
                         operation,
                         event,
                     } => self
-                        .read_stage_prompt(prompt_pattern, recovery_stage, operation)
+                        .read_stage_prompt(recovery_stage, operation)
                         .map(|prompt| (Some(event), prompt)),
                     WaitTarget::UBootPrompt { operation } => self
-                        .read_uboot_prompt(prompt_pattern, operation)
+                        .read_uboot_prompt(operation)
                         .map(|prompt| (None, prompt)),
                 };
 
@@ -366,13 +381,10 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
 
     fn read_stage_prompt(
         &mut self,
-        pattern: PromptPattern,
         stage: RecoveryStage,
         operation: &'static str,
     ) -> Result<PromptMatch, UnbrkError> {
-        let regex = pattern
-            .compile()
-            .map_err(|error| Self::invalid_prompt_regex(&error))?;
+        let regex = self.stage_prompt_regex(stage).clone();
         self.transport
             .set_timeout(self.config.prompt_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -391,14 +403,8 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
         }
     }
 
-    fn read_uboot_prompt(
-        &mut self,
-        pattern: PromptPattern,
-        operation: &'static str,
-    ) -> Result<PromptMatch, UnbrkError> {
-        let regex = pattern
-            .compile()
-            .map_err(|error| Self::invalid_prompt_regex(&error))?;
+    fn read_uboot_prompt(&mut self, operation: &'static str) -> Result<PromptMatch, UnbrkError> {
+        let regex = self.uboot_prompt_regex.clone();
         self.transport
             .set_timeout(self.config.prompt_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -474,6 +480,14 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
 
     fn console_tail(&self) -> ConsoleTail {
         ConsoleTail::from_buffer(&self.console)
+    }
+
+    fn stage_prompt_regex(&self, stage: RecoveryStage) -> &Regex {
+        match stage {
+            RecoveryStage::PreloaderPrompt => &self.initial_prompt_regex,
+            RecoveryStage::FipPrompt => &self.second_stage_prompt_regex,
+            _ => unreachable!("only prompt-wait stages use stage prompt matching"),
+        }
     }
 
     fn invalid_prompt_regex(error: &regex::Error) -> UnbrkError {

@@ -84,7 +84,7 @@ pub fn flash_from_uboot(
 ) -> Result<FlashReport, UnbrkError> {
     let prepared_stages = prepare_stage_payloads(plan)?;
 
-    let mut runner = FlashRunner::new(transport, target, config);
+    let mut runner = FlashRunner::new(transport, target, config)?;
 
     runner.ensure_prompt()?;
 
@@ -161,6 +161,8 @@ struct FlashRunner<'a, T> {
     transport: &'a mut T,
     target: TargetProfile,
     config: FlashConfig,
+    uboot_prompt_regex: Regex,
+    reset_evidence_regex: Regex,
     console: Vec<u8>,
     cursor: usize,
     events: Vec<Event>,
@@ -168,16 +170,27 @@ struct FlashRunner<'a, T> {
 }
 
 impl<'a, T: Transport> FlashRunner<'a, T> {
-    const fn new(transport: &'a mut T, target: TargetProfile, config: FlashConfig) -> Self {
-        Self {
+    fn new(
+        transport: &'a mut T,
+        target: TargetProfile,
+        config: FlashConfig,
+    ) -> Result<Self, UnbrkError> {
+        Ok(Self {
             transport,
             target,
             config,
+            uboot_prompt_regex: target
+                .prompts
+                .uboot
+                .compile()
+                .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?,
+            reset_evidence_regex: Regex::new(RESET_EVIDENCE_PATTERN)
+                .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::FlashPlan))?,
             console: Vec::new(),
             cursor: 0,
             events: Vec::new(),
             next_sequence: 1,
-        }
+        })
     }
 
     fn ensure_prompt(&mut self) -> Result<(), UnbrkError> {
@@ -467,12 +480,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 
     fn read_uboot_prompt(&mut self, operation: &'static str) -> Result<PromptMatch, UnbrkError> {
-        let regex = self
-            .target
-            .prompts
-            .uboot
-            .compile()
-            .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?;
+        let regex = self.uboot_prompt_regex.clone();
         self.transport
             .set_timeout(self.config.command_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -515,9 +523,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 
     fn read_reset_evidence(&mut self, operation: &'static str) -> Result<String, UnbrkError> {
-        let regex = Regex::new(RESET_EVIDENCE_PATTERN)
-            .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::FlashPlan))?;
-
+        let regex = self.reset_evidence_regex.clone();
         loop {
             if let Some(bytes) = self.console.get(self.cursor..)
                 && let Some(found) = regex.find(bytes)
