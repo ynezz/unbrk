@@ -21,10 +21,8 @@ git_tag_name = "v{{ version }}"
 name = "unbrk-core"
 publish = false
 release = false
-git_only = true
 
 [[package]]
 name = "xtask"
 publish = false
 release = false
-git_only = true

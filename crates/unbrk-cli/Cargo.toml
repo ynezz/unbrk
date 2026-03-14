@@ -21,4 +21,4 @@ is-terminal.workspace = true
 regex.workspace = true
 serde_json.workspace = true
 serialport.workspace = true
-unbrk-core = { path = "../unbrk-core", version = "0.1.0" }
+unbrk-core = { path = "../unbrk-core" }
