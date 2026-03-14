@@ -123,10 +123,6 @@ pub fn recover_to_uboot(
         WaitTarget::RecoveryPrompt {
             stage: RecoveryStage::FipPrompt,
             operation: "the BL31 + U-Boot FIP prompt",
-            event: EventPayload::PromptSeen {
-                stage: RecoveryStage::FipPrompt,
-                prompt: String::new(),
-            },
         },
     )?;
 
@@ -190,11 +186,11 @@ struct TransferOutcome {
     prompt_emitted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitTarget {
     RecoveryPrompt {
         stage: RecoveryStage,
         operation: &'static str,
-        event: EventPayload,
     },
     UBootPrompt {
         operation: &'static str,
@@ -313,17 +309,16 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
                     WaitTarget::RecoveryPrompt {
                         stage: recovery_stage,
                         operation,
-                        event,
                     } => self
                         .read_stage_prompt(recovery_stage, operation)
-                        .map(|prompt| (Some(event), prompt)),
+                        .map(|prompt| (Some(recovery_stage), prompt)),
                     WaitTarget::UBootPrompt { operation } => self
                         .read_uboot_prompt(operation)
                         .map(|prompt| (None, prompt)),
                 };
 
                 match prompt_result {
-                    Ok((Some(EventPayload::PromptSeen { stage, .. }), prompt)) => {
+                    Ok((Some(stage), prompt)) => {
                         self.emit_completed_from_payload(transfer_stage, payload, true);
                         self.emit(EventPayload::PromptSeen {
                             stage,
@@ -346,9 +341,6 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
                     }
                     Err(prompt_error) => {
                         Err(self.xmodem_failure(&error, &prompt_error, transfer_stage))
-                    }
-                    Ok((Some(_), _)) => {
-                        unreachable!("recovery prompt wait targets always emit PromptSeen")
                     }
                 }
             }
