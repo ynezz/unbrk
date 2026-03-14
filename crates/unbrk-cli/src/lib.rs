@@ -300,7 +300,7 @@ fn run_recover(
     }
 
     if plan.args.json {
-        write_events(stdout, &events)?;
+        write_events_and_flush(stdout, &events)?;
     } else if let Ok(outcome) = &execution {
         write_recover_summary(
             stdout,
@@ -993,6 +993,11 @@ fn flush_event_writer(writer: &mut dyn Write) -> Result<(), RunError> {
     })
 }
 
+fn write_events_and_flush(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
+    write_events(writer, events)?;
+    flush_event_writer(writer)
+}
+
 fn write_events_to_path(path: &Path, events: &[Event]) -> Result<(), RunError> {
     let file = File::create(path).map_err(|error| {
         RunError::Input(InputError::new(format!(
@@ -1001,8 +1006,7 @@ fn write_events_to_path(path: &Path, events: &[Event]) -> Result<(), RunError> {
         )))
     })?;
     let mut writer = BufWriter::new(file);
-    write_events(&mut writer, events)?;
-    flush_event_writer(&mut writer)
+    write_events_and_flush(&mut writer, events)
 }
 
 fn write_event_trace(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
@@ -1385,7 +1389,7 @@ mod tests {
         console_action_for_key_event, flush_event_writer, is_plausible_recovery_port,
         map_json_event_error, normalize_port_name, parse_command, render_port_line,
         select_recover_port, target_profile, try_run, wait_for_uboot_prompt, write_event_trace,
-        write_events, write_recover_summary, xmodem_config,
+        write_events, write_events_and_flush, write_recover_summary, xmodem_config,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
@@ -2266,6 +2270,28 @@ mod tests {
     }
 
     #[test]
+    fn write_events_and_flush_flushes_the_writer() {
+        let events = [fixture_event(
+            1,
+            100,
+            EventPayload::PortOpened {
+                port: String::from(PORT),
+                baud: 115_200,
+            },
+        )];
+        let mut writer = CountingWriter::default();
+
+        write_events_and_flush(&mut writer, &events).unwrap();
+
+        assert_eq!(writer.flush_count, 1);
+        assert!(
+            String::from_utf8(writer.output)
+                .unwrap()
+                .contains("\"kind\":\"port_opened\"")
+        );
+    }
+
+    #[test]
     fn write_event_trace_renders_pre_failure_progress() {
         let events = [
             fixture_event(
@@ -2315,6 +2341,24 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("cannot flush"))
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingWriter {
+        output: Vec<u8>,
+        flush_count: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_count += 1;
+            Ok(())
         }
     }
 
