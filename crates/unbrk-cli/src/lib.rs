@@ -542,10 +542,10 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
         .strip_prefix("0x")
         .or_else(|| normalized.strip_prefix("0X"));
 
-    match hex {
-        Some(value) => u64::from_str_radix(value, 16),
-        None => normalized.parse(),
-    }
+    hex.map_or_else(
+        || normalized.parse(),
+        |value| u64::from_str_radix(value, 16),
+    )
     .map_err(|_| format!("invalid integer literal `{raw}`"))
 }
 
@@ -555,6 +555,10 @@ mod tests {
         CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
         TerminalStatus, parse_command,
     };
+
+    const PORT: &str = "/dev/ttyUSB0";
+    const PRELOADER: &str = "preloader.bin";
+    const FIP: &str = "image.fip";
 
     fn tty_status(stdout_is_tty: bool) -> TerminalStatus {
         TerminalStatus {
@@ -574,7 +578,16 @@ mod tests {
     #[test]
     fn recover_defaults_to_fancy_progress_on_tty() {
         let plan = parse_recover(
-            &["unbrk", "recover", "--port", "/dev/ttyUSB0"],
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
             tty_status(true),
         );
 
@@ -586,7 +599,16 @@ mod tests {
     #[test]
     fn recover_defaults_to_plain_progress_without_tty() {
         let plan = parse_recover(
-            &["unbrk", "recover", "--port", "/dev/ttyUSB0"],
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
             tty_status(false),
         );
 
@@ -597,7 +619,17 @@ mod tests {
     #[test]
     fn json_mode_forces_progress_off_and_console_off() {
         let plan = parse_recover(
-            &["unbrk", "recover", "--port", "/dev/ttyUSB0", "--json"],
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--json",
+            ],
             tty_status(true),
         );
 
@@ -613,7 +645,11 @@ mod tests {
                 "unbrk",
                 "recover",
                 "--port",
-                "/dev/ttyUSB0",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
                 "--json",
                 "--progress",
                 "plain",
@@ -646,7 +682,11 @@ mod tests {
                 "unbrk",
                 "recover",
                 "--port",
-                "/dev/ttyUSB0",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
                 "--json",
                 "--no-console=false",
             ],
@@ -665,7 +705,11 @@ mod tests {
                 "unbrk",
                 "recover",
                 "--port",
-                "/dev/ttyUSB0",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
                 "--uboot-prompt",
                 "(",
             ],
@@ -688,7 +732,11 @@ mod tests {
                 "unbrk",
                 "recover",
                 "--port",
-                "/dev/ttyUSB0",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
                 "--preloader-start-block",
                 "4",
             ],
@@ -707,7 +755,11 @@ mod tests {
                 "unbrk",
                 "recover",
                 "--port",
-                "/dev/ttyUSB0",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
                 "--progress",
                 "off",
             ],
@@ -715,6 +767,80 @@ mod tests {
         );
 
         assert_eq!(plan.progress_mode, ResolvedProgressMode::Off);
+    }
+
+    #[test]
+    fn bootrom_recovery_requires_images() {
+        let error =
+            parse_command(["unbrk", "recover", "--port", PORT], tty_status(true)).unwrap_err();
+
+        assert_eq!(error.exit_code(), CliExitCode::BadInput);
+        assert!(error.to_string().contains("--preloader is required"));
+    }
+
+    #[test]
+    fn resume_from_uboot_can_skip_images_when_not_flashing() {
+        let plan = parse_recover(
+            &["unbrk", "recover", "--port", PORT, "--resume-from-uboot"],
+            tty_status(true),
+        );
+
+        assert!(plan.args.resume_from_uboot);
+        assert!(plan.console_handoff_allowed);
+    }
+
+    #[test]
+    fn flash_persistent_disables_console_handoff() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--flash-persistent",
+            ],
+            tty_status(true),
+        );
+
+        assert!(!plan.console_handoff_allowed);
+    }
+
+    #[test]
+    fn flash_layout_overrides_accept_hex_values() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--flash-persistent",
+                "--erase-block-count",
+                "0x800",
+                "--preloader-start-block",
+                "0x4",
+                "--preloader-block-count",
+                "0xfc",
+                "--fip-start-block",
+                "0x100",
+                "--fip-block-count",
+                "0x700",
+            ],
+            tty_status(true),
+        );
+
+        assert_eq!(plan.args.erase_block_count, Some(0x800));
+        assert_eq!(plan.args.preloader_start_block, Some(0x4));
+        assert_eq!(plan.args.preloader_block_count, Some(0xfc));
+        assert_eq!(plan.args.fip_start_block, Some(0x100));
+        assert_eq!(plan.args.fip_block_count, Some(0x700));
     }
 
     #[test]
