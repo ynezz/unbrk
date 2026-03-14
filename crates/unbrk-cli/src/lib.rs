@@ -1632,11 +1632,34 @@ static EMOJI_HOURGLASS: Emoji<'_, '_> = Emoji("⏳ ", "");
 static EMOJI_TIMER: Emoji<'_, '_> = Emoji("⏱  ", "");
 static EMOJI_MONITOR: Emoji<'_, '_> = Emoji("🖥  ", "");
 static EMOJI_RESUME: Emoji<'_, '_> = Emoji("🔄 ", "");
+const FANCY_UNBRK_LOGO_LINES: [&str; 5] = [
+    "██  ██  ██  ██  █████   █████   ██  ██",
+    "██  ██  ███ ██  ██  ██  ██  ██  ██ ██ ",
+    "██  ██  ██████  █████   █████   ████  ",
+    "██  ██  ██ ███  ██  ██  ██ ██   ██ ██ ",
+    " ████   ██  ██  █████   ██  ██  ██  ██",
+];
+const FANCY_UNBRK_LOGO_GRADIENT: [u8; 5] = [19, 21, 27, 33, 39];
 
 /// Build a styled label for the startup banner (bold cyan, right-aligned).
 fn banner_label(text: &str) -> String {
     let label = Style::new().bold().cyan().for_stderr().apply_to(text);
     format!("{label:>12}")
+}
+
+fn banner_logo_lines() -> Vec<String> {
+    FANCY_UNBRK_LOGO_LINES
+        .iter()
+        .zip(FANCY_UNBRK_LOGO_GRADIENT)
+        .map(|(line, color)| {
+            Style::new()
+                .bold()
+                .color256(color)
+                .for_stderr()
+                .apply_to(*line)
+                .to_string()
+        })
+        .collect()
 }
 
 fn recover_startup_banner(
@@ -1653,13 +1676,15 @@ fn recover_startup_banner(
 }
 
 fn fancy_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile) -> Vec<String> {
-    let mut lines = vec![format!(
+    let mut lines = banner_logo_lines();
+    lines.push(String::new());
+    lines.push(format!(
         "{}{} {port} \u{00b7} {} \u{00b7} {} baud",
         EMOJI_WRENCH,
         banner_label("Recovery"),
         target.name,
         plan.args.baud,
-    )];
+    ));
 
     if plan.args.resume_from_uboot {
         lines.push(format!(
@@ -2369,12 +2394,13 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliExitCode, CommandPlan, ConsoleAction, FancyProgressRenderer, PlainProgressRenderer,
-        ProgressMode, RecoverOutcome, RecoverPlan, ResolvedProgressMode, RunError, TerminalStatus,
-        append_events, build_flash_plan, console_action_for_key_event, flush_event_writer,
-        is_plausible_recovery_port, map_json_event_error, normalize_port_name, parse_command,
-        render_port_line, select_recover_port, target_profile, timeout_hint, transfer_message,
-        try_run, wait_for_uboot_prompt, write_event_trace, write_events, write_events_and_flush,
+        CliExitCode, CommandPlan, ConsoleAction, FANCY_UNBRK_LOGO_LINES, FancyProgressRenderer,
+        PlainProgressRenderer, ProgressMode, RecoverOutcome, RecoverPlan, ResolvedProgressMode,
+        RunError, TerminalStatus, append_events, build_flash_plan, console_action_for_key_event,
+        fancy_startup_banner, flush_event_writer, is_plausible_recovery_port, map_json_event_error,
+        normalize_port_name, parse_command, plain_startup_banner, render_port_line,
+        select_recover_port, target_profile, timeout_hint, transfer_message, try_run,
+        wait_for_uboot_prompt, write_event_trace, write_events, write_events_and_flush,
         write_recover_summary, xmodem_config,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2462,6 +2488,54 @@ mod tests {
 
         assert_eq!(plan.progress_mode, ResolvedProgressMode::Plain);
         assert!(!plan.console_handoff_allowed);
+    }
+
+    #[test]
+    fn fancy_startup_banner_prepends_the_unbrk_logo() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
+            tty_status(true),
+        );
+
+        let lines = fancy_startup_banner(&plan, PORT, &AN7581);
+
+        assert_eq!(&lines[..5], &FANCY_UNBRK_LOGO_LINES);
+        assert!(lines[5].is_empty());
+        assert!(lines[6].contains("Recovery"));
+    }
+
+    #[test]
+    fn plain_startup_banner_keeps_the_text_only_layout() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
+            tty_status(false),
+        );
+
+        let lines = plain_startup_banner(&plan, PORT, &AN7581);
+
+        assert!(lines[0].starts_with("Starting recovery on"));
+        assert!(
+            lines.iter().all(|line| !line.contains("██")),
+            "plain banner should not render the logo: {lines:?}"
+        );
     }
 
     #[test]

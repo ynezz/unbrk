@@ -44,8 +44,16 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
+            rendered.contains("██  ██  ██  ██"),
+            "expected the ANSI logo in PTY output:\n{rendered}"
+        );
+        assert!(
             rendered.contains("happy-path-stage1-prompt.bin"),
             "expected fancy startup banner in PTY output:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Recovery"),
+            "expected banner metadata in PTY output:\n{rendered}"
         );
         assert!(
             rendered.contains("serial error:"),
