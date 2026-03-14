@@ -1,0 +1,24 @@
+[workspace]
+repo_url = "https://github.com/ynezz/unbrk"
+pr_labels = ["release"]
+release_always = false
+semver_check = false
+git_release_enable = false
+git_tag_enable = false
+
+[[package]]
+name = "unbrk-cli"
+changelog_path = "CHANGELOG.md"
+changelog_include = ["unbrk-core"]
+git_only = true
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+
+[[package]]
+name = "unbrk-core"
+release = false
+
+[[package]]
+name = "xtask"
+release = false
