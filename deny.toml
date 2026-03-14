@@ -21,7 +21,6 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
-copyleft = "deny"
 
 [licenses.private]
 ignore = true
