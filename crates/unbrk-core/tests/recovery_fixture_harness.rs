@@ -3,7 +3,7 @@ mod support;
 use std::io;
 use support::recovery_fixture_harness::{FixtureRecoveryScenario, ReplayPoint};
 use unbrk_core::error::UnbrkError;
-use unbrk_core::{EventKind, EventPayload, MockStep, RecoveryStage, TransferStage};
+use unbrk_core::{EventKind, EventPayload, LoadAddr, MockStep, RecoveryStage, TransferStage};
 
 #[test]
 fn happy_path_fixtures_drive_the_recovery_state_machine() {
@@ -137,6 +137,78 @@ fn harness_supports_targeted_failure_injection() {
         }
         other => panic!("expected a timeout from the injected replay failure, got {other:?}"),
     }
+}
+
+#[test]
+fn happy_path_fixtures_drive_recovery_and_flash_end_to_end() {
+    let scenario = FixtureRecoveryScenario::an7581_happy_path().unwrap();
+    let run = scenario.run_with_flash().unwrap();
+
+    assert_eq!(
+        run.recovery.states.as_slice(),
+        FixtureRecoveryScenario::expected_states()
+    );
+    assert_eq!(run.flash.loadaddr, LoadAddr::new(0x8180_0000));
+    assert_eq!(run.flash.reset_evidence, "EcoNet System Reset");
+    assert!(!run.flash.preloader_recovered_from_eot_quirk);
+    assert!(!run.flash.fip_recovered_from_eot_quirk);
+
+    let recovery_console = String::from_utf8_lossy(&run.recovery.console);
+    assert_eq!(run.recovery.console, run.expected_recovery_console);
+    assert!(recovery_console.contains("U-Boot 2026.01-OpenWrt"));
+
+    assert!(matches!(
+        &run.flash.events[0].payload,
+        EventPayload::UBootPromptSeen { prompt } if prompt == "AN7581>"
+    ));
+    assert!(run.flash.events.iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::UBootCommandCompleted { command, summary, .. }
+            if command == "printenv loadaddr" && summary.as_deref() == Some("loadaddr read")
+    )));
+    assert!(run.flash.events.iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::UBootCommandCompleted { command, summary, .. }
+            if command == "mmc erase 0x0 0x800" && summary.as_deref() == Some("erase completed")
+    )));
+    assert_eq!(
+        run.flash
+            .events
+            .iter()
+            .filter(|event| matches!(
+                &event.payload,
+                EventPayload::UBootCommandCompleted { command, summary, .. }
+                    if command == "loadx $loadaddr 115200"
+                        && summary.as_deref() == Some("loadx completed")
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        run.flash
+            .events
+            .iter()
+            .filter(|event| matches!(&event.payload, EventPayload::ImageVerified { .. }))
+            .count(),
+        2
+    );
+    assert!(run.flash.events.iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::ResetSeen { evidence } if evidence == "EcoNet System Reset"
+    )));
+    assert!(run.flash.events.iter().any(|event| matches!(
+        &event.payload,
+        EventPayload::HandoffReady {
+            interactive_console: false,
+        }
+    )));
+
+    let flash_console = String::from_utf8_lossy(&run.flash.console);
+    assert!(flash_console.contains("2048 blocks erased: OK"));
+    assert!(flash_console.contains("1792 blocks written: OK"));
+    assert!(flash_console.contains("EcoNet System Reset"));
+
+    run.transport.assert_finished();
 }
 
 #[test]

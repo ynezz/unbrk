@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use unbrk_core::error::UnbrkError;
 use unbrk_core::target::AN7581;
@@ -8,14 +9,17 @@ use unbrk_core::xmodem::{
     XMODEM_ACK, XMODEM_CRC_READY_MIN_BYTES, XMODEM_EOT, XmodemConfig, build_crc_packet,
 };
 use unbrk_core::{
-    MockStep, MockTransport, RecoveryConfig, RecoveryImages, RecoveryReport, RecoveryState,
-    recover_to_uboot,
+    FlashConfig, FlashReport, MockStep, MockTransport, RecoveryConfig, RecoveryImages,
+    RecoveryReport, RecoveryState, flash_from_uboot, recover_to_uboot,
 };
 
 const FIXTURE_ROOT: &str = "../../tests/fixtures/an7581";
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(1);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const RESET_TIMEOUT: Duration = Duration::from_secs(1);
 const PRELOADER_BYTES: [u8; 4] = [0x11; 4];
 const FIP_BYTES: [u8; 4] = [0x22; 4];
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const EXPECTED_STATES: [RecoveryState; 10] = [
     RecoveryState::WaitForInitialPrompt,
@@ -163,6 +167,49 @@ impl FixtureRecoveryScenario {
         self.run_with_overrides(std::iter::empty())
     }
 
+    /// Runs the fixture replay through recovery and the persistent flash phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns any typed recovery or flash failure from the core flows.
+    pub fn run_with_flash(&self) -> Result<FixtureRecoveryAndFlashRun, UnbrkError> {
+        let preloader = TempFile::with_bytes(&self.preloader);
+        let fip = TempFile::with_bytes(&self.fip);
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
+        let mut script = self
+            .script()
+            .into_iter()
+            .map(|entry| entry.step)
+            .collect::<Vec<_>>();
+        script.extend(self.flash_script());
+
+        let mut transport = MockTransport::new(script);
+        let recovery = recover_to_uboot(
+            &mut transport,
+            AN7581,
+            RecoveryImages {
+                preloader_name: self.preloader_name,
+                preloader: &self.preloader,
+                fip_name: self.fip_name,
+                fip: &self.fip,
+            },
+            RecoveryConfig::new(self.prompt_timeout, self.xmodem),
+        )?;
+        let flash = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, self.xmodem),
+        )?;
+
+        Ok(FixtureRecoveryAndFlashRun {
+            recovery,
+            flash,
+            transport,
+            expected_recovery_console: self.fixtures.expected_recovery_console(),
+        })
+    }
+
     /// Runs the fixture replay with targeted scripted-step overrides.
     ///
     /// # Errors
@@ -275,6 +322,89 @@ impl FixtureRecoveryScenario {
             ),
         ]
     }
+
+    fn flash_script(&self) -> Vec<MockStep> {
+        let preloader_packet = build_crc_packet(1, &self.preloader);
+        let fip_packet = build_crc_packet(1, &self.fip);
+
+        vec![
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(vec![b'\r']),
+            MockStep::Flush,
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"\r\nAN7581> ".to_vec()),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"printenv loadaddr\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                b"AN7581> printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> ".to_vec(),
+            ),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"mmc erase 0x0 0x800\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                b"AN7581> mmc erase 0x0 0x800\r\n2048 blocks erased: OK\r\nAN7581> ".to_vec(),
+            ),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
+            MockStep::Flush,
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
+            MockStep::Write(preloader_packet),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::Write(vec![XMODEM_EOT]),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"printenv filesize\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=4\r\nAN7581> ".to_vec()),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"mmc write $loadaddr 0x4 0xfc\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                b"AN7581> mmc write $loadaddr 0x4 0xfc\r\n252 blocks written: OK\r\nAN7581> "
+                    .to_vec(),
+            ),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
+            MockStep::Flush,
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
+            MockStep::Write(fip_packet),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::Write(vec![XMODEM_EOT]),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"printenv filesize\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec()),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"mmc write $loadaddr 0x100 0x700\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                b"AN7581> mmc write $loadaddr 0x100 0x700\r\n1792 blocks written: OK\r\nAN7581> "
+                    .to_vec(),
+            ),
+            MockStep::SetTimeout(RESET_TIMEOUT),
+            MockStep::Write(b"reset\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                fs::read(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../tests/fixtures/an7581/reset-evidence.bin"),
+                )
+                .expect("reset fixture must load"),
+            ),
+        ]
+    }
 }
 
 #[derive(Debug)]
@@ -282,4 +412,38 @@ pub struct FixtureRun {
     pub report: RecoveryReport,
     pub transport: MockTransport,
     pub expected_console: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct FixtureRecoveryAndFlashRun {
+    pub recovery: RecoveryReport,
+    pub flash: FlashReport,
+    pub transport: MockTransport,
+    pub expected_recovery_console: Vec<u8>,
+}
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn with_bytes(bytes: &[u8]) -> Self {
+        let path = unique_temp_path();
+        fs::write(&path, bytes).expect("temp fixture image must be writable");
+        Self { path }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ignored = fs::remove_file(&self.path);
+    }
+}
+
+fn unique_temp_path() -> PathBuf {
+    let unique_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "unbrk-fixture-harness-{}-{unique_id}.bin",
+        std::process::id()
+    ))
 }
