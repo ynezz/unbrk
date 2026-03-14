@@ -21,17 +21,31 @@ recovery has been validated on either host yet.
 
 ## Installation
 
-`unbrk` is distributed through GitHub Releases, not crates.io.
+### One-liner (Linux / macOS)
 
-- Download the archive that matches your host from the
-  [Releases](https://github.com/ynezz/unbrk/releases) page.
-- Linux and macOS releases ship as `.tar.gz` archives.
-- Windows releases ship as `.zip` archives.
-- Shell and PowerShell installer scripts are attached to each tagged release.
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ynezz/unbrk/releases/latest/download/unbrk-cli-installer.sh | sh
+```
 
-`cargo install` is intentionally not supported yet. The CLI contract is still
-settling, so public installation stays tied to signed release artifacts instead
-of crates.io.
+### PowerShell (Windows)
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/ynezz/unbrk/releases/latest/download/unbrk-cli-installer.ps1 | iex"
+```
+
+### Manual download
+
+Download the archive that matches your host from the
+[Releases](https://github.com/ynezz/unbrk/releases) page:
+
+| Platform | Archive |
+|---|---|
+| Linux x86_64 | `unbrk-cli-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `unbrk-cli-x86_64-apple-darwin.tar.gz` |
+| macOS ARM | `unbrk-cli-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `unbrk-cli-x86_64-pc-windows-msvc.zip` |
+
+### Verification
 
 Before using a release artifact, verify both integrity and provenance:
 
