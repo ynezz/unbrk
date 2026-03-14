@@ -1,9 +1,7 @@
 //! Persistent flash-plan execution from a live U-Boot prompt.
 
 use crate::error::{ConsoleTail, UnbrkError};
-use crate::event::{
-    Event, EventPayload, ImageKind, RecoveryStage, TransferStage, timestamp_now_unix_ms,
-};
+use crate::event::{Event, EventPayload, EventRecorder, ImageKind, RecoveryStage, TransferStage};
 use crate::prompt::{PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex};
 use crate::target::{BlockCount, FlashPlan, TargetProfile, WriteStage};
 use crate::transport::Transport;
@@ -76,15 +74,19 @@ pub struct FlashReport {
 /// Returns a typed error when image validation fails before erase, when a
 /// U-Boot command does not complete successfully, when XMODEM does not make
 /// forward progress to the prompt, or when reset evidence never appears.
-pub fn flash_from_uboot(
+pub fn flash_from_uboot<F>(
     transport: &mut impl Transport,
     target: TargetProfile,
     plan: &FlashPlan,
     config: FlashConfig,
-) -> Result<FlashReport, UnbrkError> {
+    observer: F,
+) -> Result<FlashReport, UnbrkError>
+where
+    F: FnMut(&Event),
+{
     let prepared_stages = prepare_stage_payloads(plan)?;
 
-    let mut runner = FlashRunner::new(transport, target, config)?;
+    let mut runner = FlashRunner::new(transport, target, config, observer)?;
 
     runner.ensure_prompt()?;
 
@@ -131,7 +133,7 @@ pub fn flash_from_uboot(
     });
 
     Ok(FlashReport {
-        events: runner.events,
+        events: runner.event_recorder.into_events(),
         console: runner.console,
         loadaddr,
         reset_evidence,
@@ -157,7 +159,7 @@ enum TotalSizeVerification {
     Skipped,
 }
 
-struct FlashRunner<'a, T> {
+struct FlashRunner<'a, T, O> {
     transport: &'a mut T,
     target: TargetProfile,
     config: FlashConfig,
@@ -165,15 +167,19 @@ struct FlashRunner<'a, T> {
     reset_evidence_regex: Regex,
     console: Vec<u8>,
     cursor: usize,
-    events: Vec<Event>,
-    next_sequence: u64,
+    event_recorder: EventRecorder<O>,
 }
 
-impl<'a, T: Transport> FlashRunner<'a, T> {
+impl<'a, T, O> FlashRunner<'a, T, O>
+where
+    T: Transport,
+    O: FnMut(&Event),
+{
     fn new(
         transport: &'a mut T,
         target: TargetProfile,
         config: FlashConfig,
+        observer: O,
     ) -> Result<Self, UnbrkError> {
         let uboot_prompt_regex = target
             .prompts
@@ -190,8 +196,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
                 .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::FlashPlan))?,
             console: Vec::new(),
             cursor: 0,
-            events: Vec::new(),
-            next_sequence: 1,
+            event_recorder: EventRecorder::new(observer),
         })
     }
 
@@ -343,24 +348,21 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         transfer_stage: TransferStage,
         payload: &[u8],
     ) -> Result<XmodemTransferReport, crate::xmodem::XmodemError> {
-        let mut progress_events = Vec::new();
-        let transfer = send_crc(
-            self.transport,
+        let transport = &mut *self.transport;
+        let event_recorder = &mut self.event_recorder;
+        send_crc(
+            transport,
             transfer_stage,
             payload,
             self.config.xmodem,
-            |progress| progress_events.push(progress),
-        );
-
-        for progress in progress_events {
-            self.emit(EventPayload::XmodemProgress {
-                stage: progress.stage,
-                bytes_sent: progress.bytes_sent,
-                total_bytes: progress.total_bytes,
-            });
-        }
-
-        transfer
+            |progress| {
+                event_recorder.emit(EventPayload::XmodemProgress {
+                    stage: progress.stage,
+                    bytes_sent: progress.bytes_sent,
+                    total_bytes: progress.total_bytes,
+                });
+            },
+        )
     }
 
     fn recover_or_fail_from_loadx_error(
@@ -582,10 +584,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 
     fn emit(&mut self, payload: EventPayload) {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        let event = Event::new(sequence, timestamp_now_unix_ms().unwrap_or(0), payload);
-        self.events.push(event);
+        self.event_recorder.emit(payload);
     }
 
     fn emit_xmodem_completed(
@@ -686,7 +685,7 @@ fn file_name(path: &Path) -> String {
 mod tests {
     use super::{FlashConfig, flash_from_uboot, payload_block_count};
     use crate::error::UnbrkError;
-    use crate::event::{EventPayload, ImageKind, TransferStage};
+    use crate::event::{Event, EventPayload, ImageKind, TransferStage};
     use crate::target::{AN7581, BlockCount};
     use crate::transport::{MockStep, MockTransport, Transport};
     use crate::uboot::{LoadAddr, UBootCommandOutput};
@@ -719,6 +718,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap();
 
@@ -781,6 +781,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap();
 
@@ -812,6 +813,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap_err();
 
@@ -826,7 +828,7 @@ mod tests {
     fn total_size_verification_reports_the_hex_count_when_only_hex_disagrees() {
         let output = UBootCommandOutput::new(b"Total Size = 0x5 = 4 Bytes\r\nAN7581> ".to_vec());
 
-        let error = super::FlashRunner::<MockTransport>::verify_total_size(
+        let error = super::FlashRunner::<MockTransport, fn(&Event)>::verify_total_size(
             ImageKind::Preloader,
             &[0x11, 0x22, 0x33, 0x44],
             &output,
@@ -853,7 +855,7 @@ mod tests {
     fn total_size_verification_reports_the_decimal_count_when_only_decimal_disagrees() {
         let output = UBootCommandOutput::new(b"Total Size = 0x4 = 5 Bytes\r\nAN7581> ".to_vec());
 
-        let error = super::FlashRunner::<MockTransport>::verify_total_size(
+        let error = super::FlashRunner::<MockTransport, fn(&Event)>::verify_total_size(
             ImageKind::Fip,
             &[0xaa, 0xbb, 0xcc, 0xdd],
             &output,
@@ -888,6 +890,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap_err();
 
@@ -907,6 +910,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap_err();
 
@@ -941,6 +945,7 @@ mod tests {
                 RESET_TIMEOUT,
                 XmodemConfig::new(Duration::ZERO, 10, 1),
             ),
+            |_| {},
         )
         .unwrap();
 
@@ -977,6 +982,7 @@ mod tests {
                 RESET_TIMEOUT,
                 XmodemConfig::new(Duration::ZERO, 10, 1),
             ),
+            |_| {},
         )
         .unwrap_err();
 
@@ -1033,6 +1039,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap_err();
 
@@ -1068,6 +1075,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap();
 
@@ -1088,6 +1096,7 @@ mod tests {
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap_err();
 

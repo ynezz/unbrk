@@ -234,12 +234,14 @@ impl FixtureRecoveryScenario {
                 fip: &self.fip,
             },
             RecoveryConfig::new(self.prompt_timeout, self.xmodem),
+            |_| {},
         )?;
         let flash = flash_from_uboot(
             &mut transport,
             AN7581,
             &plan,
             FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, self.xmodem),
+            |_| {},
         )?;
 
         Ok(FixtureRecoveryAndFlashRun {
@@ -287,6 +289,7 @@ impl FixtureRecoveryScenario {
                 fip: &self.fip,
             },
             RecoveryConfig::new(self.prompt_timeout, self.xmodem),
+            |_| {},
         )?;
 
         Ok(FixtureRun {

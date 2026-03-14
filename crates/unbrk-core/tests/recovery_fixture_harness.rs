@@ -444,8 +444,14 @@ fn oversized_images_are_rejected_before_flash_io_begins() {
     let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
     let mut transport = MockTransport::new([]);
 
-    let error =
-        flash_from_uboot(&mut transport, AN7581, &plan, FlashConfig::default()).unwrap_err();
+    let error = flash_from_uboot(
+        &mut transport,
+        AN7581,
+        &plan,
+        FlashConfig::default(),
+        |_| {},
+    )
+    .unwrap_err();
 
     match error {
         UnbrkError::BadInput { message } => {

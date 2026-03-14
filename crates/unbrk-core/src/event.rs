@@ -418,6 +418,37 @@ pub(crate) fn timestamp_now_unix_ms() -> Result<u64, SystemTimeError> {
     Ok(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
 }
 
+pub(crate) struct EventRecorder<O> {
+    events: Vec<Event>,
+    next_sequence: u64,
+    observer: O,
+}
+
+impl<O> EventRecorder<O>
+where
+    O: FnMut(&Event),
+{
+    pub(crate) const fn new(observer: O) -> Self {
+        Self {
+            events: Vec::new(),
+            next_sequence: 1,
+            observer,
+        }
+    }
+
+    pub(crate) fn emit(&mut self, payload: EventPayload) {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        let event = Event::new(sequence, timestamp_now_unix_ms().unwrap_or(0), payload);
+        (self.observer)(&event);
+        self.events.push(event);
+    }
+
+    pub(crate) fn into_events(self) -> Vec<Event> {
+        self.events
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

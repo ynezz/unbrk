@@ -9,6 +9,7 @@ use crossterm::event::{
     self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
 use is_terminal::IsTerminal;
 use regex::Regex;
 use serialport::{SerialPortInfo, SerialPortType, available_ports};
@@ -21,6 +22,7 @@ use std::time::Duration;
 use unbrk_core::error::{ConsoleTail, UnbrkError};
 use unbrk_core::event::{
     EVENT_SCHEMA_VERSION, Event, EventPayload, FailureClass, ImageKind, RecoveryStage,
+    TransferStage,
 };
 use unbrk_core::flash::{DEFAULT_RESET_TIMEOUT, FlashConfig, flash_from_uboot};
 use unbrk_core::prompt::advance_to_prompt_allowing_trailing_space_with_regex;
@@ -245,8 +247,11 @@ fn run_recover(
     let port = recover_port(plan)?;
     let target = target_profile(&plan.args);
     let mut events = Vec::new();
-    push_event(
+    let mut renderer = matches!(plan.progress_mode, ResolvedProgressMode::Fancy)
+        .then(|| FancyProgressRenderer::new(plan));
+    record_local_event(
         &mut events,
+        &mut renderer,
         EventPayload::SessionStarted {
             schema_version: EVENT_SCHEMA_VERSION,
             tool_version: String::from(env!("CARGO_PKG_VERSION")),
@@ -256,17 +261,21 @@ fn run_recover(
     );
 
     let mut transport = open_transport(port.as_str(), &plan.args)?;
-    push_event(
+    record_local_event(
         &mut events,
+        &mut renderer,
         EventPayload::PortOpened {
             port: port.clone(),
             baud: plan.args.baud,
         },
     );
 
-    let mut execution = execute_recover(plan, target, &mut transport, &mut events);
+    let mut execution = execute_recover(plan, target, &mut transport, &mut events, &mut renderer);
     let mut console_handoff_completed = false;
     if matches!(execution, Ok(RecoverOutcome::Recovered)) && plan.console_handoff_allowed {
+        if let Some(renderer) = renderer.as_ref() {
+            renderer.finish();
+        }
         match handoff_console(&mut transport, stdout) {
             Ok(()) => {
                 console_handoff_completed = true;
@@ -276,14 +285,25 @@ fn run_recover(
     }
 
     if let Err(error) = &execution {
-        push_event(
+        if let Some(renderer) = renderer.as_ref() {
+            renderer.finish();
+        }
+        record_local_event(
             &mut events,
+            &mut renderer,
             EventPayload::Failure {
                 class: error.failure_class(),
                 message: error.to_string(),
             },
         );
         if !plan.args.json {
+            if matches!(error, RunError::Timeout(_))
+                && let Some(hint) = timeout_hint(&events)
+            {
+                writeln!(stderr, "{hint}").map_err(|source| {
+                    stderr_io_error("writing the timeout remediation hint", &source)
+                })?;
+            }
             write_event_trace(stderr, &events[..events.len().saturating_sub(1)])?;
         }
     }
@@ -810,6 +830,7 @@ fn execute_recover(
     target: TargetProfile,
     transport: &mut CliTransport,
     events: &mut Vec<Event>,
+    renderer: &mut Option<FancyProgressRenderer>,
 ) -> Result<RecoverOutcome, RunError> {
     let recovery_config = RecoveryConfig::new(
         duration_override(plan.args.prompt_timeout, DEFAULT_PROMPT_TIMEOUT),
@@ -824,9 +845,11 @@ fn execute_recover(
     if plan.args.resume_from_uboot {
         if plan.args.flash_persistent {
             let flash_plan = build_flash_plan(&plan.args, &target)?;
-            let flash_report = flash_from_uboot(transport, target, &flash_plan, flash_config)
+            let flash_report =
+                flash_from_uboot(transport, target, &flash_plan, flash_config, |event| {
+                    record_core_event(events, renderer, event.clone());
+                })
                 .map_err(RunError::from)?;
-            append_events(events, flash_report.events);
             return Ok(RecoverOutcome::FlashedFromExistingPrompt {
                 reset_evidence: flash_report.reset_evidence,
             });
@@ -838,9 +861,10 @@ fn execute_recover(
             duration_override(plan.args.command_timeout, DEFAULT_COMMAND_TIMEOUT),
         )
         .map_err(RunError::from)?;
-        push_event(events, EventPayload::UBootPromptSeen { prompt });
-        push_event(
+        record_local_event(events, renderer, EventPayload::UBootPromptSeen { prompt });
+        record_local_event(
             events,
+            renderer,
             EventPayload::HandoffReady {
                 interactive_console: plan.console_handoff_allowed,
             },
@@ -862,7 +886,7 @@ fn execute_recover(
             fip_path.display()
         )))
     })?;
-    let recovery_report = recover_to_uboot(
+    let _recovery_report = recover_to_uboot(
         transport,
         &target,
         RecoveryImages {
@@ -872,21 +896,24 @@ fn execute_recover(
             fip: &fip,
         },
         recovery_config,
+        |event| record_core_event(events, renderer, event.clone()),
     )
     .map_err(RunError::from)?;
-    append_events(events, recovery_report.events);
 
     if plan.args.flash_persistent {
         let flash_plan = build_flash_plan(&plan.args, &target)?;
-        let flash_report = flash_from_uboot(transport, target, &flash_plan, flash_config)
+        let flash_report =
+            flash_from_uboot(transport, target, &flash_plan, flash_config, |event| {
+                record_core_event(events, renderer, event.clone());
+            })
             .map_err(RunError::from)?;
-        append_events(events, flash_report.events);
         Ok(RecoverOutcome::FlashedAfterRecovery {
             reset_evidence: flash_report.reset_evidence,
         })
     } else {
-        push_event(
+        record_local_event(
             events,
+            renderer,
             EventPayload::HandoffReady {
                 interactive_console: plan.console_handoff_allowed,
             },
@@ -1102,6 +1129,317 @@ fn wait_for_uboot_prompt(
     }
 }
 
+struct FancyProgressRenderer {
+    bar: ProgressBar,
+    flash_persistent: bool,
+}
+
+impl FancyProgressRenderer {
+    fn new(plan: &RecoverPlan) -> Self {
+        let bar = ProgressBar::new_spinner();
+        bar.enable_steady_tick(Duration::from_millis(120));
+        let renderer = Self {
+            bar,
+            flash_persistent: plan.args.flash_persistent,
+        };
+        renderer.set_waiting_message(if plan.args.resume_from_uboot {
+            "Waiting for live U-Boot prompt"
+        } else {
+            "Waiting for recovery mode"
+        });
+        renderer
+    }
+
+    fn observe(&self, event: &Event) {
+        match &event.payload {
+            EventPayload::PromptSeen {
+                stage: RecoveryStage::PreloaderPrompt,
+                ..
+            } => {
+                self.set_waiting_message("Sending x for preloader");
+            }
+            EventPayload::PromptSeen {
+                stage: RecoveryStage::FipPrompt,
+                ..
+            } => {
+                self.set_waiting_message("Sending x for FIP");
+            }
+            EventPayload::InputSent {
+                stage: RecoveryStage::PreloaderPrompt,
+                ..
+            } => {
+                self.set_waiting_message("Waiting for preloader XMODEM");
+            }
+            EventPayload::InputSent {
+                stage: RecoveryStage::FipPrompt,
+                ..
+            } => {
+                self.set_waiting_message("Waiting for FIP XMODEM");
+            }
+            EventPayload::CrcReady { stage, .. } => {
+                self.set_waiting_message(match stage {
+                    TransferStage::Preloader => "Uploading preloader",
+                    TransferStage::Fip => "Uploading FIP",
+                    TransferStage::LoadxPreloader => "Uploading preloader for flash",
+                    TransferStage::LoadxFip => "Uploading FIP for flash",
+                });
+            }
+            EventPayload::XmodemStarted {
+                stage, size_bytes, ..
+            } => {
+                self.start_transfer(*stage, *size_bytes);
+            }
+            EventPayload::XmodemProgress {
+                stage,
+                bytes_sent,
+                total_bytes,
+            } => {
+                self.update_transfer(*stage, *bytes_sent, *total_bytes);
+            }
+            EventPayload::XmodemCompleted {
+                stage,
+                recovered_from_eot_quirk,
+                ..
+            } => {
+                self.complete_transfer(*stage, *recovered_from_eot_quirk);
+            }
+            EventPayload::UBootPromptSeen { .. } => {
+                if self.flash_persistent {
+                    self.set_waiting_message("Preparing persistent flash");
+                } else {
+                    self.finish();
+                }
+            }
+            EventPayload::UBootCommandStarted { command } => {
+                self.observe_command_started(command.as_str());
+            }
+            EventPayload::ImageVerified { image, .. } => {
+                self.set_waiting(format!("Verified {image}; writing image to flash"));
+            }
+            EventPayload::ResetSeen { .. } => {
+                self.set_waiting_message("Reset observed");
+            }
+            EventPayload::HandoffReady { .. } | EventPayload::Failure { .. } => {
+                self.finish();
+            }
+            EventPayload::SessionStarted { .. }
+            | EventPayload::PortOpened { .. }
+            | EventPayload::PromptSeen { .. }
+            | EventPayload::InputSent { .. }
+            | EventPayload::UBootCommandCompleted { .. } => {}
+        }
+    }
+
+    fn finish(&self) {
+        self.bar.finish_and_clear();
+    }
+
+    fn complete_transfer(&self, stage: TransferStage, recovered_from_eot_quirk: bool) {
+        if recovered_from_eot_quirk {
+            self.bar.println(format!(
+                "Recovered from an EOT quirk while uploading {}.",
+                stage_label(stage)
+            ));
+        }
+
+        match stage {
+            TransferStage::Preloader => self.set_waiting_message("Waiting for stage 2 prompt"),
+            TransferStage::Fip => self.set_waiting_message("Waiting for live U-Boot prompt"),
+            TransferStage::LoadxPreloader => {
+                self.set_waiting_message("Verifying preloader before flash write");
+            }
+            TransferStage::LoadxFip => self.set_waiting_message("Verifying FIP before flash write"),
+        }
+    }
+
+    fn observe_command_started(&self, command: &str) {
+        if command == "printenv loadaddr" {
+            self.set_waiting_message("Reading U-Boot load address");
+        } else if command.starts_with("mmc erase ") {
+            self.set_waiting_message("Erasing persistent flash");
+        } else if command.starts_with("loadx ") {
+            self.set_waiting_message("Waiting for XMODEM after loadx");
+        } else if command == "printenv filesize" {
+            self.set_waiting_message("Verifying transferred image size");
+        } else if command.starts_with("mmc write ") {
+            self.set_waiting_message("Writing image to flash");
+        } else if command == "reset" {
+            self.set_waiting_message("Waiting for reset after flashing");
+        } else {
+            self.set_waiting(format!("Running `{command}`"));
+        }
+    }
+
+    fn start_transfer(&self, stage: TransferStage, total_bytes: u64) {
+        self.bar.set_style(fancy_transfer_style());
+        self.bar.enable_steady_tick(Duration::from_millis(120));
+        self.bar.set_length(total_bytes);
+        self.bar.set_position(0);
+        self.bar
+            .set_message(transfer_message(stage, 0, total_bytes, Duration::ZERO));
+        self.bar.tick();
+    }
+
+    fn update_transfer(&self, stage: TransferStage, bytes_sent: u64, total_bytes: u64) {
+        self.bar.set_style(fancy_transfer_style());
+        self.bar.set_length(total_bytes);
+        self.bar.set_position(bytes_sent);
+        self.bar.set_message(transfer_message(
+            stage,
+            bytes_sent,
+            total_bytes,
+            self.bar.elapsed(),
+        ));
+        self.bar.tick();
+    }
+
+    fn set_waiting_message(&self, message: &'static str) {
+        self.set_waiting(message);
+    }
+
+    fn set_waiting(&self, message: impl Into<String>) {
+        self.bar.set_style(fancy_spinner_style());
+        self.bar.enable_steady_tick(Duration::from_millis(120));
+        self.bar.set_length(0);
+        self.bar.set_position(0);
+        self.bar.set_message(message.into());
+        self.bar.tick();
+    }
+}
+
+fn fancy_spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.green} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+}
+
+fn fancy_transfer_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.green} {msg}\n{wide_bar:.cyan/blue}")
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+}
+
+const fn stage_label(stage: TransferStage) -> &'static str {
+    match stage {
+        TransferStage::Preloader | TransferStage::LoadxPreloader => "preloader",
+        TransferStage::Fip | TransferStage::LoadxFip => "FIP",
+    }
+}
+
+fn transfer_message(
+    stage: TransferStage,
+    bytes_sent: u64,
+    total_bytes: u64,
+    elapsed: Duration,
+) -> String {
+    let elapsed_millis = elapsed.as_millis();
+    let rate = if elapsed_millis == 0 {
+        String::from("0 B/s")
+    } else {
+        let per_second = u128::from(bytes_sent).saturating_mul(1000) / elapsed_millis;
+        let per_second = u64::try_from(per_second).unwrap_or(u64::MAX);
+        HumanBytes(per_second).to_string() + "/s"
+    };
+
+    format!(
+        "Uploading {} ({}/{}, {}, {})",
+        stage_label(stage),
+        HumanBytes(bytes_sent),
+        HumanBytes(total_bytes),
+        rate,
+        HumanDuration(elapsed),
+    )
+}
+
+fn record_local_event(
+    events: &mut Vec<Event>,
+    renderer: &mut Option<FancyProgressRenderer>,
+    payload: EventPayload,
+) {
+    push_event(events, payload);
+    observe_last_event(events, renderer);
+}
+
+fn record_core_event(
+    events: &mut Vec<Event>,
+    renderer: &mut Option<FancyProgressRenderer>,
+    event: Event,
+) {
+    push_existing_event(events, event);
+    observe_last_event(events, renderer);
+}
+
+fn observe_last_event(events: &[Event], renderer: &mut Option<FancyProgressRenderer>) {
+    if let (Some(event), Some(renderer)) = (events.last(), renderer.as_mut()) {
+        renderer.observe(event);
+    }
+}
+
+fn timeout_hint(events: &[Event]) -> Option<&'static str> {
+    match events.iter().rev().find_map(|event| match &event.payload {
+        EventPayload::PromptSeen {
+            stage: RecoveryStage::PreloaderPrompt,
+            ..
+        }
+        | EventPayload::InputSent {
+            stage: RecoveryStage::PreloaderPrompt,
+            ..
+        } => Some("hint: confirm the board is in recovery mode and emitting the initial prompt before retrying"),
+        EventPayload::CrcReady {
+            stage: TransferStage::Preloader,
+            ..
+        }
+        | EventPayload::XmodemStarted {
+            stage: TransferStage::Preloader,
+            ..
+        }
+        | EventPayload::XmodemProgress {
+            stage: TransferStage::Preloader,
+            ..
+        }
+        | EventPayload::XmodemCompleted {
+            stage: TransferStage::Preloader,
+            ..
+        } => Some("hint: the preloader transfer started but stage 2 never appeared; check UART integrity and power-cycle back into recovery mode"),
+        EventPayload::PromptSeen {
+            stage: RecoveryStage::FipPrompt,
+            ..
+        }
+        | EventPayload::InputSent {
+            stage: RecoveryStage::FipPrompt,
+            ..
+        }
+        | EventPayload::CrcReady {
+            stage: TransferStage::Fip,
+            ..
+        }
+        | EventPayload::XmodemStarted {
+            stage: TransferStage::Fip,
+            ..
+        }
+        | EventPayload::XmodemProgress {
+            stage: TransferStage::Fip,
+            ..
+        }
+        | EventPayload::XmodemCompleted {
+            stage: TransferStage::Fip,
+            ..
+        } => Some("hint: the FIP path stalled before a live U-Boot prompt; verify the image pair matches the target and retry from a fresh power cycle"),
+        EventPayload::UBootCommandStarted { .. }
+        | EventPayload::UBootCommandCompleted { .. }
+        | EventPayload::ImageVerified { .. } => Some("hint: the persistent flash phase timed out; keep the serial console attached and check storage access plus reset evidence"),
+        _ => None,
+    }) {
+        Some(message) => Some(message),
+        None if events
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::PortOpened { .. })) =>
+        {
+            Some("hint: check UART access, board power, and whether the target is emitting any recovery prompt")
+        }
+        None => None,
+    }
+}
+
+#[cfg(test)]
 fn append_events(events: &mut Vec<Event>, appended: Vec<Event>) {
     for event in appended {
         push_existing_event(events, event);
@@ -1565,12 +1903,13 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliExitCode, CommandPlan, ConsoleAction, ProgressMode, RecoverOutcome, RecoverPlan,
-        ResolvedProgressMode, RunError, TerminalStatus, append_events, build_flash_plan,
-        console_action_for_key_event, flush_event_writer, is_plausible_recovery_port,
-        map_json_event_error, normalize_port_name, parse_command, render_port_line,
-        select_recover_port, target_profile, try_run, wait_for_uboot_prompt, write_event_trace,
-        write_events, write_events_and_flush, write_recover_summary, xmodem_config,
+        CliExitCode, CommandPlan, ConsoleAction, FancyProgressRenderer, ProgressMode,
+        RecoverOutcome, RecoverPlan, ResolvedProgressMode, RunError, TerminalStatus, append_events,
+        build_flash_plan, console_action_for_key_event, flush_event_writer,
+        is_plausible_recovery_port, map_json_event_error, normalize_port_name, parse_command,
+        render_port_line, select_recover_port, target_profile, timeout_hint, transfer_message,
+        try_run, wait_for_uboot_prompt, write_event_trace, write_events, write_events_and_flush,
+        write_recover_summary, xmodem_config,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
@@ -1581,7 +1920,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use unbrk_core::error::UnbrkError;
-    use unbrk_core::event::{Event, EventPayload, RecoveryStage};
+    use unbrk_core::event::{Event, EventPayload, RecoveryStage, TransferStage};
     use unbrk_core::target::{
         AN7581, BlockCount, BlockOffset, BlockRange, FlashLayout, PromptPattern, TargetProfile,
     };
@@ -2083,6 +2422,98 @@ mod tests {
         assert_eq!(
             ProgressMode::Auto.resolve(false),
             ResolvedProgressMode::Plain
+        );
+    }
+
+    #[test]
+    fn fancy_renderer_tracks_major_recovery_phases() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
+            tty_status(true),
+        );
+        let renderer = FancyProgressRenderer::new(&plan);
+
+        assert_eq!(renderer.bar.message(), "Waiting for recovery mode");
+
+        renderer.observe(&fixture_event(
+            1,
+            0,
+            EventPayload::PromptSeen {
+                stage: RecoveryStage::PreloaderPrompt,
+                prompt: String::from("Press x"),
+            },
+        ));
+        assert_eq!(renderer.bar.message(), "Sending x for preloader");
+
+        renderer.observe(&fixture_event(
+            2,
+            0,
+            EventPayload::XmodemStarted {
+                stage: TransferStage::Preloader,
+                file_name: String::from(PRELOADER),
+                size_bytes: 1024,
+            },
+        ));
+        assert!(renderer.bar.message().contains("Uploading preloader"));
+
+        renderer.observe(&fixture_event(
+            3,
+            0,
+            EventPayload::XmodemProgress {
+                stage: TransferStage::Preloader,
+                bytes_sent: 512,
+                total_bytes: 1024,
+            },
+        ));
+        assert!(renderer.bar.message().contains("512 B"));
+
+        renderer.observe(&fixture_event(
+            4,
+            0,
+            EventPayload::XmodemCompleted {
+                stage: TransferStage::Preloader,
+                bytes_sent: 1024,
+                expected_bytes: 1024,
+                recovered_from_eot_quirk: false,
+            },
+        ));
+        assert_eq!(renderer.bar.message(), "Waiting for stage 2 prompt");
+    }
+
+    #[test]
+    fn transfer_message_reports_bytes_rate_and_elapsed() {
+        let message = transfer_message(TransferStage::Fip, 2048, 4096, Duration::from_secs(2));
+
+        assert!(message.contains("Uploading FIP"));
+        assert!(message.contains("/s"));
+        assert!(message.contains("/4.00 KiB"));
+    }
+
+    #[test]
+    fn timeout_hint_points_to_the_stalled_phase() {
+        let events = vec![fixture_event(
+            1,
+            0,
+            EventPayload::XmodemStarted {
+                stage: TransferStage::Fip,
+                file_name: String::from(FIP),
+                size_bytes: 4096,
+            },
+        )];
+
+        assert!(
+            timeout_hint(&events)
+                .unwrap()
+                .contains("FIP path stalled before a live U-Boot prompt")
         );
     }
 

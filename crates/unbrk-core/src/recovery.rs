@@ -1,7 +1,7 @@
 //! Recovery-state orchestration for reaching the RAM-resident U-Boot prompt.
 
 use crate::error::{ConsoleTail, UnbrkError};
-use crate::event::{Event, EventPayload, RecoveryStage, TransferStage, timestamp_now_unix_ms};
+use crate::event::{Event, EventPayload, EventRecorder, RecoveryStage, TransferStage};
 use crate::prompt::{
     PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex, advance_to_prompt_with_regex,
 };
@@ -79,13 +79,17 @@ pub struct RecoveryReport {
 ///
 /// Returns a typed recovery error when prompt waits, CRC readiness detection,
 /// or XMODEM transfers fail without forward progress to the next prompt.
-pub fn recover_to_uboot(
+pub fn recover_to_uboot<F>(
     transport: &mut impl Transport,
     target: &TargetProfile,
     images: RecoveryImages<'_>,
     config: RecoveryConfig,
-) -> Result<RecoveryReport, UnbrkError> {
-    let mut runner = RecoveryRunner::new(transport, target, config)?;
+    observer: F,
+) -> Result<RecoveryReport, UnbrkError>
+where
+    F: FnMut(&Event),
+{
+    let mut runner = RecoveryRunner::new(transport, target, config, observer)?;
 
     runner.push_state(RecoveryState::WaitForInitialPrompt);
     let initial_prompt = runner.read_stage_prompt(
@@ -173,7 +177,7 @@ pub fn recover_to_uboot(
 
     Ok(RecoveryReport {
         states: runner.states,
-        events: runner.events,
+        events: runner.event_recorder.into_events(),
         console: runner.console,
         preloader_recovered_from_eot_quirk: preloader_result.recovered_from_eot_quirk,
         fip_recovered_from_eot_quirk: fip_result.recovered_from_eot_quirk,
@@ -197,7 +201,7 @@ enum WaitTarget {
     },
 }
 
-struct RecoveryRunner<'a, T> {
+struct RecoveryRunner<'a, T, O> {
     transport: &'a mut T,
     config: RecoveryConfig,
     initial_prompt_regex: Regex,
@@ -205,16 +209,20 @@ struct RecoveryRunner<'a, T> {
     uboot_prompt_regex: Regex,
     console: Vec<u8>,
     cursor: usize,
-    events: Vec<Event>,
+    event_recorder: EventRecorder<O>,
     states: Vec<RecoveryState>,
-    next_sequence: u64,
 }
 
-impl<'a, T: Transport> RecoveryRunner<'a, T> {
+impl<'a, T, O> RecoveryRunner<'a, T, O>
+where
+    T: Transport,
+    O: FnMut(&Event),
+{
     fn new(
         transport: &'a mut T,
         target: &TargetProfile,
         config: RecoveryConfig,
+        observer: O,
     ) -> Result<Self, UnbrkError> {
         Ok(Self {
             transport,
@@ -236,9 +244,8 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
                 .map_err(|error| Self::invalid_prompt_regex(&error))?,
             console: Vec::new(),
             cursor: 0,
-            events: Vec::new(),
+            event_recorder: EventRecorder::new(observer),
             states: Vec::new(),
-            next_sequence: 1,
         })
     }
 
@@ -247,10 +254,7 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
     }
 
     fn emit(&mut self, payload: EventPayload) {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        let event = Event::new(sequence, timestamp_now_unix_ms().unwrap_or(0), payload);
-        self.events.push(event);
+        self.event_recorder.emit(payload);
     }
 
     fn send_literal_input(&mut self, stage: RecoveryStage, byte: u8) -> Result<(), UnbrkError> {
@@ -274,22 +278,23 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
         wait_state: RecoveryState,
         wait_target: WaitTarget,
     ) -> Result<TransferOutcome, UnbrkError> {
-        let mut progress_events = Vec::new();
-        let transfer = send_crc(
-            self.transport,
-            transfer_stage,
-            payload,
-            self.config.xmodem,
-            |progress| progress_events.push(progress),
-        );
-
-        for progress in progress_events {
-            self.emit(EventPayload::XmodemProgress {
-                stage: progress.stage,
-                bytes_sent: progress.bytes_sent,
-                total_bytes: progress.total_bytes,
-            });
-        }
+        let transfer = {
+            let transport = &mut *self.transport;
+            let event_recorder = &mut self.event_recorder;
+            send_crc(
+                transport,
+                transfer_stage,
+                payload,
+                self.config.xmodem,
+                |progress| {
+                    event_recorder.emit(EventPayload::XmodemProgress {
+                        stage: progress.stage,
+                        bytes_sent: progress.bytes_sent,
+                        total_bytes: progress.total_bytes,
+                    });
+                },
+            )
+        };
 
         match transfer {
             Ok(report) => {
@@ -576,6 +581,7 @@ mod tests {
                 fip: &fip,
             },
             RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap();
 
@@ -651,6 +657,7 @@ mod tests {
                 fip: &fip,
             },
             RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::new(Duration::ZERO, 10, 1)),
+            |_| {},
         )
         .unwrap();
 
@@ -722,6 +729,7 @@ mod tests {
                 fip: &fip,
             },
             RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::new(Duration::ZERO, 10, 1)),
+            |_| {},
         )
         .unwrap();
 
@@ -762,6 +770,7 @@ mod tests {
                 fip: &fip,
             },
             RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::new(Duration::ZERO, 10, 1)),
+            |_| {},
         )
         .unwrap_err();
 
@@ -808,6 +817,7 @@ mod tests {
                 fip: &fip,
             },
             RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::default()),
+            |_| {},
         )
         .unwrap_err();
 
