@@ -6,11 +6,28 @@ use crate::prompt::find_prompt_allowing_trailing_space_with_regex;
 use crate::target::PromptPattern;
 use crate::transport::Transport;
 use regex::{Regex, bytes::Regex as BytesRegex};
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 /// Default timeout for one U-Boot command round-trip.
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+
+static LOADADDR_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"loadaddr=([0-9a-fA-Fx]+)").expect("static loadaddr regex is valid")
+});
+static FILESIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"filesize=([0-9a-fA-Fx]+)").expect("static filesize regex is valid")
+});
+static MMC_ERASE_SUCCESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)blocks erased:\s+OK").expect("static MMC erase regex is valid")
+});
+static MMC_WRITE_SUCCESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)blocks written:\s+OK").expect("static MMC write regex is valid")
+});
+static TOTAL_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Total Size\s*=\s*0x([0-9a-fA-F]+)\s*=\s*([0-9]+)\s*Bytes")
+        .expect("static Total Size regex is valid")
+});
 
 /// Parsed `loadaddr` value from `printenv loadaddr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,7 +193,7 @@ pub fn run_command(
 /// Returns a protocol error when the output does not contain a parseable
 /// `loadaddr=` assignment.
 pub fn parse_loadaddr(output: &UBootCommandOutput) -> Result<LoadAddr, UnbrkError> {
-    let value = capture_hex_value(output, r"loadaddr=([0-9a-fA-Fx]+)", "U-Boot loadaddr")?;
+    let value = capture_hex_value(output, &LOADADDR_REGEX, "U-Boot loadaddr")?;
     let parsed = u32::try_from(parse_u_boot_hex(value.as_str(), output)?).map_err(|_| {
         UnbrkError::Protocol {
             stage: RecoveryStage::UBoot,
@@ -195,7 +212,7 @@ pub fn parse_loadaddr(output: &UBootCommandOutput) -> Result<LoadAddr, UnbrkErro
 /// Returns a protocol error when the output does not contain a parseable
 /// `filesize=` assignment.
 pub fn parse_filesize(output: &UBootCommandOutput) -> Result<FileSize, UnbrkError> {
-    let value = capture_hex_value(output, r"filesize=([0-9a-fA-Fx]+)", "U-Boot filesize")?;
+    let value = capture_hex_value(output, &FILESIZE_REGEX, "U-Boot filesize")?;
     Ok(FileSize::new(parse_u_boot_hex(value.as_str(), output)?))
 }
 
@@ -206,7 +223,7 @@ pub fn parse_filesize(output: &UBootCommandOutput) -> Result<FileSize, UnbrkErro
 /// Returns a protocol error when the command output does not contain the
 /// expected erase-success marker.
 pub fn parse_mmc_erase_success(output: &UBootCommandOutput) -> Result<MmcEraseSuccess, UnbrkError> {
-    require_output(output, r"(?i)blocks erased:\s+OK", "MMC erase")?;
+    require_output(output, &MMC_ERASE_SUCCESS_REGEX, "MMC erase")?;
     Ok(MmcEraseSuccess)
 }
 
@@ -217,7 +234,7 @@ pub fn parse_mmc_erase_success(output: &UBootCommandOutput) -> Result<MmcEraseSu
 /// Returns a protocol error when the command output does not contain the
 /// expected write-success marker.
 pub fn parse_mmc_write_success(output: &UBootCommandOutput) -> Result<MmcWriteSuccess, UnbrkError> {
-    require_output(output, r"(?i)blocks written:\s+OK", "MMC write")?;
+    require_output(output, &MMC_WRITE_SUCCESS_REGEX, "MMC write")?;
     Ok(MmcWriteSuccess)
 }
 
@@ -234,15 +251,13 @@ pub fn parse_mmc_write_success(output: &UBootCommandOutput) -> Result<MmcWriteSu
 pub fn parse_optional_total_size(
     output: &UBootCommandOutput,
 ) -> Result<Option<TransferSize>, UnbrkError> {
-    let regex = Regex::new(r"Total Size\s*=\s*0x([0-9a-fA-F]+)\s*=\s*([0-9]+)\s*Bytes")
-        .expect("static Total Size regex is valid");
     let text = output.as_lossy_str();
 
     if !text.contains("Total Size") {
         return Ok(None);
     }
 
-    let captures = regex.captures(text.as_str()).ok_or_else(|| {
+    let captures = TOTAL_SIZE_REGEX.captures(text.as_str()).ok_or_else(|| {
         malformed_output_error(output, "loadx total size", &"missing expected fields")
     })?;
 
@@ -278,7 +293,7 @@ pub fn parse_total_size(output: &UBootCommandOutput) -> Result<TransferSize, Unb
 
 fn prompt_search_cursor(regex: &BytesRegex, output: &[u8]) -> usize {
     let Some(line_end) = first_line_end(output) else {
-        return 0;
+        return output.len();
     };
 
     let Some(first_prompt) = find_prompt_allowing_trailing_space_with_regex(regex, output, 0)
@@ -308,10 +323,9 @@ fn first_line_end(bytes: &[u8]) -> Option<usize> {
 
 fn capture_hex_value(
     output: &UBootCommandOutput,
-    pattern: &str,
+    regex: &Regex,
     label: &str,
 ) -> Result<String, UnbrkError> {
-    let regex = Regex::new(pattern).expect("static parser regex is valid");
     let text = output.as_lossy_str();
     let captures = regex
         .captures(text.as_str())
@@ -332,10 +346,9 @@ fn parse_u_boot_hex(value: &str, output: &UBootCommandOutput) -> Result<u64, Unb
 
 fn require_output(
     output: &UBootCommandOutput,
-    pattern: &str,
+    regex: &Regex,
     label: &str,
 ) -> Result<(), UnbrkError> {
-    let regex = Regex::new(pattern).expect("static parser regex is valid");
     if regex.is_match(output.as_lossy_str().as_str()) {
         Ok(())
     } else {
@@ -401,6 +414,31 @@ mod tests {
         .unwrap();
 
         assert!(output.as_lossy_str().contains("loadaddr=0x81800000"));
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn run_command_does_not_match_a_partial_echoed_prompt_before_the_first_line_ends() {
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(DEFAULT_COMMAND_TIMEOUT),
+            MockStep::Write(b"printenv loadaddr\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(b"AN7581> ".to_vec()),
+            MockStep::Read(b"printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> ".to_vec()),
+        ]);
+
+        let output = run_command(
+            &mut transport,
+            AN7581.prompts.uboot,
+            "printenv loadaddr",
+            DEFAULT_COMMAND_TIMEOUT,
+        )
+        .unwrap();
+
+        assert_eq!(
+            output.as_lossy_str(),
+            "AN7581> printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> "
+        );
         transport.assert_finished();
     }
 
