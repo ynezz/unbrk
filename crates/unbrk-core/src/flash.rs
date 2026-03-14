@@ -175,15 +175,17 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         target: TargetProfile,
         config: FlashConfig,
     ) -> Result<Self, UnbrkError> {
+        let uboot_prompt_regex = target
+            .prompts
+            .uboot
+            .compile()
+            .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?;
+
         Ok(Self {
             transport,
             target,
             config,
-            uboot_prompt_regex: target
-                .prompts
-                .uboot
-                .compile()
-                .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?,
+            uboot_prompt_regex,
             reset_evidence_regex: Regex::new(RESET_EVIDENCE_PATTERN)
                 .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::FlashPlan))?,
             console: Vec::new(),
@@ -225,7 +227,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         });
         let output = run_command(
             self.transport,
-            self.target.prompts.uboot,
+            &self.target.prompts.uboot,
             command,
             self.config.command_timeout,
         )?;

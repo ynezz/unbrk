@@ -81,7 +81,7 @@ pub struct RecoveryReport {
 /// or XMODEM transfers fail without forward progress to the next prompt.
 pub fn recover_to_uboot(
     transport: &mut impl Transport,
-    target: TargetProfile,
+    target: &TargetProfile,
     images: RecoveryImages<'_>,
     config: RecoveryConfig,
 ) -> Result<RecoveryReport, UnbrkError> {
@@ -217,7 +217,7 @@ struct RecoveryRunner<'a, T> {
 impl<'a, T: Transport> RecoveryRunner<'a, T> {
     fn new(
         transport: &'a mut T,
-        target: TargetProfile,
+        target: &TargetProfile,
         config: RecoveryConfig,
     ) -> Result<Self, UnbrkError> {
         Ok(Self {
@@ -576,7 +576,7 @@ mod tests {
 
         let report = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: "preloader.bin",
                 preloader: &preloader,
@@ -651,7 +651,7 @@ mod tests {
 
         let report = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: "preloader.bin",
                 preloader: &preloader,
@@ -722,7 +722,7 @@ mod tests {
 
         let report = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: "preloader.bin",
                 preloader: &preloader,
@@ -762,7 +762,7 @@ mod tests {
 
         let error = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: "preloader.bin",
                 preloader: &preloader,
@@ -808,7 +808,7 @@ mod tests {
 
         let error = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: "preloader.bin",
                 preloader: &preloader,

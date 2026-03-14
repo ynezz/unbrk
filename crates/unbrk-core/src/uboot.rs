@@ -111,7 +111,7 @@ impl UBootCommandOutput {
 /// Returns serial, timeout, or protocol errors while executing the command.
 pub fn run_command(
     transport: &mut impl Transport,
-    prompt: PromptPattern,
+    prompt: &PromptPattern,
     command: &str,
     timeout: Duration,
 ) -> Result<UBootCommandOutput, UnbrkError> {
@@ -426,7 +426,7 @@ mod tests {
 
         let output = run_command(
             &mut transport,
-            AN7581.prompts.uboot,
+            &AN7581.prompts.uboot,
             "printenv loadaddr",
             DEFAULT_COMMAND_TIMEOUT,
         )
@@ -448,7 +448,7 @@ mod tests {
 
         let output = run_command(
             &mut transport,
-            AN7581.prompts.uboot,
+            &AN7581.prompts.uboot,
             "printenv loadaddr",
             DEFAULT_COMMAND_TIMEOUT,
         )
@@ -472,7 +472,7 @@ mod tests {
 
         let error = run_command(
             &mut transport,
-            AN7581.prompts.uboot,
+            &AN7581.prompts.uboot,
             "version",
             DEFAULT_COMMAND_TIMEOUT,
         )
@@ -512,7 +512,7 @@ mod tests {
 
         let output = run_command(
             &mut transport,
-            AN7581.prompts.uboot,
+            &AN7581.prompts.uboot,
             "version",
             DEFAULT_COMMAND_TIMEOUT,
         )

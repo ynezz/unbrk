@@ -684,7 +684,7 @@ fn execute_recover(
 
     if plan.args.resume_from_uboot {
         if plan.args.flash_persistent {
-            let flash_plan = build_flash_plan(&plan.args, target)?;
+            let flash_plan = build_flash_plan(&plan.args, &target)?;
             let flash_report = flash_from_uboot(transport, target, &flash_plan, flash_config)
                 .map_err(RunError::from)?;
             append_events(events, flash_report.events);
@@ -695,7 +695,7 @@ fn execute_recover(
 
         let prompt = wait_for_uboot_prompt(
             transport,
-            target.prompts.uboot,
+            &target.prompts.uboot,
             duration_override(plan.args.command_timeout, DEFAULT_COMMAND_TIMEOUT),
         )
         .map_err(RunError::from)?;
@@ -725,7 +725,7 @@ fn execute_recover(
     })?;
     let recovery_report = recover_to_uboot(
         transport,
-        target,
+        &target,
         RecoveryImages {
             preloader_name: file_name(preloader_path),
             preloader: &preloader,
@@ -738,7 +738,7 @@ fn execute_recover(
     append_events(events, recovery_report.events);
 
     if plan.args.flash_persistent {
-        let flash_plan = build_flash_plan(&plan.args, target)?;
+        let flash_plan = build_flash_plan(&plan.args, &target)?;
         let flash_report = flash_from_uboot(transport, target, &flash_plan, flash_config)
             .map_err(RunError::from)?;
         append_events(events, flash_report.events);
@@ -767,10 +767,10 @@ fn xmodem_config(args: &RecoverArgs) -> XmodemConfig {
 }
 
 fn target_profile(args: &RecoverArgs) -> TargetProfile {
-    let prompt_source = args
-        .uboot_prompt
-        .as_deref()
-        .map_or_else(|| AN7581.prompts.uboot.as_str(), leak_string);
+    let uboot_prompt = args.uboot_prompt.as_ref().map_or_else(
+        || AN7581.prompts.uboot,
+        |source| PromptPattern::from_owned(source.clone()),
+    );
 
     TargetProfile {
         serial: unbrk_core::target::SerialSettings {
@@ -778,15 +778,11 @@ fn target_profile(args: &RecoverArgs) -> TargetProfile {
             ..AN7581.serial
         },
         prompts: PromptPatterns {
-            uboot: PromptPattern::new(prompt_source),
+            uboot: uboot_prompt,
             ..AN7581.prompts
         },
         ..AN7581
     }
-}
-
-fn leak_string(value: &str) -> &'static str {
-    Box::leak(value.to_owned().into_boxed_str())
 }
 
 fn duration_override(override_seconds: Option<u64>, default: Duration) -> Duration {
@@ -810,7 +806,7 @@ fn file_name(path: &Path) -> &str {
         .unwrap_or("image")
 }
 
-fn build_flash_plan(args: &RecoverArgs, target: TargetProfile) -> Result<FlashPlan, RunError> {
+fn build_flash_plan(args: &RecoverArgs, target: &TargetProfile) -> Result<FlashPlan, RunError> {
     let preloader_path = required_image_path(args.preloader.as_ref(), "--preloader")?;
     let fip_path = required_image_path(args.fip.as_ref(), "--fip")?;
     let defaults = target.flash;
@@ -903,7 +899,7 @@ fn validate_block_range(
 
 fn wait_for_uboot_prompt(
     transport: &mut impl Transport,
-    pattern: PromptPattern,
+    pattern: &PromptPattern,
     timeout: Duration,
 ) -> Result<String, UnbrkError> {
     let regex = pattern.compile().map_err(|error| UnbrkError::Protocol {
@@ -2094,7 +2090,7 @@ mod tests {
             tty_status(false),
         );
 
-        let flash_plan = build_flash_plan(&plan.args, target_profile(&plan.args)).unwrap();
+        let flash_plan = build_flash_plan(&plan.args, &target_profile(&plan.args)).unwrap();
 
         assert_eq!(flash_plan.block_size, AN7581.flash.block_size);
         assert_eq!(
@@ -2144,7 +2140,7 @@ mod tests {
             tty_status(false),
         );
 
-        let error = build_flash_plan(&plan.args, target_profile(&plan.args)).unwrap_err();
+        let error = build_flash_plan(&plan.args, &target_profile(&plan.args)).unwrap_err();
 
         match error {
             RunError::Input(error) => {
@@ -2182,7 +2178,7 @@ mod tests {
             ..AN7581
         };
 
-        let flash_plan = build_flash_plan(&plan.args, target).unwrap();
+        let flash_plan = build_flash_plan(&plan.args, &target).unwrap();
 
         assert_eq!(
             flash_plan.erase_ranges[0].start_block,
@@ -2236,7 +2232,7 @@ mod tests {
         ]);
 
         let prompt =
-            wait_for_uboot_prompt(&mut transport, PromptPattern::new(r"VALYRIAN>"), timeout)
+            wait_for_uboot_prompt(&mut transport, &PromptPattern::new(r"VALYRIAN>"), timeout)
                 .unwrap();
 
         assert_eq!(prompt, "VALYRIAN>");

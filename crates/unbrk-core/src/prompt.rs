@@ -68,7 +68,7 @@ pub fn find_prompt_allowing_trailing_space_with_regex(
 ///
 /// Returns a regex compilation error when the prompt source is invalid.
 pub fn find_prompt(
-    pattern: PromptPattern,
+    pattern: &PromptPattern,
     buffer: &[u8],
     cursor: usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
@@ -85,7 +85,7 @@ pub fn find_prompt(
 ///
 /// Returns a regex compilation error when the prompt source is invalid.
 pub fn find_prompt_allowing_trailing_space(
-    pattern: PromptPattern,
+    pattern: &PromptPattern,
     buffer: &[u8],
     cursor: usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
@@ -101,7 +101,7 @@ pub fn find_prompt_allowing_trailing_space(
 ///
 /// Returns a regex compilation error when the prompt source is invalid.
 pub fn advance_to_prompt(
-    pattern: PromptPattern,
+    pattern: &PromptPattern,
     buffer: &[u8],
     cursor: &mut usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
@@ -131,7 +131,7 @@ pub fn advance_to_prompt_with_regex(
 ///
 /// Returns a regex compilation error when the prompt source is invalid.
 pub fn advance_to_prompt_allowing_trailing_space(
-    pattern: PromptPattern,
+    pattern: &PromptPattern,
     buffer: &[u8],
     cursor: &mut usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn initial_prompt_matches_the_stage1_fixture() {
-        let matched = find_prompt(AN7581.prompts.initial_recovery, STAGE1_PROMPT, 0)
+        let matched = find_prompt(&AN7581.prompts.initial_recovery, STAGE1_PROMPT, 0)
             .unwrap()
             .unwrap();
 
@@ -192,14 +192,14 @@ mod tests {
 
     #[test]
     fn initial_prompt_does_not_consume_the_longer_stage2_prompt() {
-        let matched = find_prompt(AN7581.prompts.initial_recovery, STAGE2_PROMPT, 0).unwrap();
+        let matched = find_prompt(&AN7581.prompts.initial_recovery, STAGE2_PROMPT, 0).unwrap();
 
         assert_eq!(matched, None);
     }
 
     #[test]
     fn second_prompt_matches_the_stage2_fixture() {
-        let matched = find_prompt(AN7581.prompts.second_stage, STAGE2_PROMPT, 0)
+        let matched = find_prompt(&AN7581.prompts.second_stage, STAGE2_PROMPT, 0)
             .unwrap()
             .unwrap();
 
@@ -218,11 +218,11 @@ mod tests {
         let full = STAGE2_PROMPT;
 
         assert_eq!(
-            find_prompt(AN7581.prompts.second_stage, prefix, 0).unwrap(),
+            find_prompt(&AN7581.prompts.second_stage, prefix, 0).unwrap(),
             None
         );
 
-        let matched = find_prompt(AN7581.prompts.second_stage, full, 0)
+        let matched = find_prompt(&AN7581.prompts.second_stage, full, 0)
             .unwrap()
             .unwrap();
         assert_eq!(matched.next_cursor, 33);
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn prompt_matching_accepts_control_terminated_lines() {
-        let matched = find_prompt(AN7581.prompts.initial_recovery, b"noise\rPress x\n", 0)
+        let matched = find_prompt(&AN7581.prompts.initial_recovery, b"noise\rPress x\n", 0)
             .unwrap()
             .unwrap();
 
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn initial_prompt_can_follow_stale_bytes_from_real_hardware() {
         let matched = find_prompt(
-            AN7581.prompts.initial_recovery,
+            &AN7581.prompts.initial_recovery,
             REAL_STAGE1_LEADING_GARBAGE,
             0,
         )
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn second_prompt_can_follow_real_boot_notice_chatter() {
         let matched = find_prompt(
-            AN7581.prompts.second_stage,
+            &AN7581.prompts.second_stage,
             REAL_STAGE2_NOTICE_AND_PROMPT,
             0,
         )
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn uboot_prompt_matching_accepts_a_trailing_space() {
-        let matched = find_prompt_allowing_trailing_space(AN7581.prompts.uboot, b"AN7581> ", 0)
+        let matched = find_prompt_allowing_trailing_space(&AN7581.prompts.uboot, b"AN7581> ", 0)
             .unwrap()
             .unwrap();
 
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn uboot_prompt_matching_tolerates_real_ansi_prefix_bytes() {
         let matched =
-            find_prompt_allowing_trailing_space(AN7581.prompts.uboot, REAL_UBOOT_ANSI_PROMPT, 0)
+            find_prompt_allowing_trailing_space(&AN7581.prompts.uboot, REAL_UBOOT_ANSI_PROMPT, 0)
                 .unwrap()
                 .unwrap();
 
@@ -295,13 +295,13 @@ mod tests {
         combined.extend_from_slice(STAGE2_PROMPT);
 
         let mut cursor = 0;
-        let first = advance_to_prompt(AN7581.prompts.initial_recovery, &combined, &mut cursor)
+        let first = advance_to_prompt(&AN7581.prompts.initial_recovery, &combined, &mut cursor)
             .unwrap()
             .unwrap();
         assert_eq!(first.prompt, "Press x");
         assert_eq!(cursor, 7);
 
-        let second = advance_to_prompt(AN7581.prompts.second_stage, &combined, &mut cursor)
+        let second = advance_to_prompt(&AN7581.prompts.second_stage, &combined, &mut cursor)
             .unwrap()
             .unwrap();
         assert_eq!(second.prompt, "Press x to load BL31 + U-Boot FIP");
@@ -312,7 +312,7 @@ mod tests {
     fn cursor_advancement_for_uboot_prompt_stops_before_the_trailing_space() {
         let mut cursor = 0;
         let matched = advance_to_prompt_allowing_trailing_space(
-            AN7581.prompts.uboot,
+            &AN7581.prompts.uboot,
             b"AN7581> \r\n",
             &mut cursor,
         )

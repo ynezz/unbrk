@@ -226,7 +226,7 @@ impl FixtureRecoveryScenario {
         let mut transport = MockTransport::new(script.into_iter().map(|entry| entry.step));
         let recovery = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: self.preloader_name,
                 preloader: &self.preloader,
@@ -279,7 +279,7 @@ impl FixtureRecoveryScenario {
         let mut transport = MockTransport::new(script.into_iter().map(|entry| entry.step));
         let report = recover_to_uboot(
             &mut transport,
-            AN7581,
+            &AN7581,
             RecoveryImages {
                 preloader_name: self.preloader_name,
                 preloader: &self.preloader,

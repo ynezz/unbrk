@@ -4,6 +4,7 @@ use crate::error::UnbrkError;
 use crate::event::{ImageKind, RecoveryStage, TransferStage};
 use regex::{Error as RegexError, bytes::Regex};
 use serialport::{DataBits, FlowControl, Parity, StopBits};
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -50,7 +51,7 @@ pub const AN7581: TargetProfile = TargetProfile {
 
 /// Strongly typed target definition for a single supported board profile.
 #[allow(clippy::module_name_repetitions)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetProfile {
     pub name: &'static str,
     pub serial: SerialSettings,
@@ -67,13 +68,13 @@ impl TargetProfile {
     /// # Errors
     ///
     /// Returns the first regex compilation failure.
-    pub fn validate(self) -> Result<(), RegexError> {
+    pub fn validate(&self) -> Result<(), RegexError> {
         self.prompts.validate()
     }
 
     /// Builds the default flash plan for this target profile.
     #[must_use]
-    pub fn flash_plan(self, preloader: impl Into<PathBuf>, fip: impl Into<PathBuf>) -> FlashPlan {
+    pub fn flash_plan(&self, preloader: impl Into<PathBuf>, fip: impl Into<PathBuf>) -> FlashPlan {
         FlashPlan {
             block_size: self.flash.block_size,
             erase_ranges: vec![EraseRange::new(
@@ -109,7 +110,7 @@ pub struct SerialSettings {
 }
 
 /// Prompt matchers for the recovery and U-Boot phases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptPatterns {
     pub initial_recovery: PromptPattern,
     pub second_stage: PromptPattern,
@@ -122,7 +123,7 @@ impl PromptPatterns {
     /// # Errors
     ///
     /// Returns the first regex compilation failure.
-    pub fn validate(self) -> Result<(), RegexError> {
+    pub fn validate(&self) -> Result<(), RegexError> {
         self.initial_recovery.compile()?;
         self.second_stage.compile()?;
         self.uboot.compile()?;
@@ -131,22 +132,32 @@ impl PromptPatterns {
 }
 
 /// Raw regex source for a board-specific prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptPattern {
-    source: &'static str,
+    source: Cow<'static, str>,
 }
 
 impl PromptPattern {
     /// Creates a prompt pattern from a static regex source string.
     #[must_use]
     pub const fn new(source: &'static str) -> Self {
-        Self { source }
+        Self {
+            source: Cow::Borrowed(source),
+        }
+    }
+
+    /// Creates a prompt pattern from an owned runtime regex source string.
+    #[must_use]
+    pub fn from_owned(source: impl Into<String>) -> Self {
+        Self {
+            source: Cow::Owned(source.into()),
+        }
     }
 
     /// Returns the raw regex source string.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        self.source
+    pub fn as_str(&self) -> &str {
+        self.source.as_ref()
     }
 
     /// Compiles the prompt regex.
@@ -154,8 +165,8 @@ impl PromptPattern {
     /// # Errors
     ///
     /// Returns the `regex` crate's bytes-regex compilation error.
-    pub fn compile(self) -> Result<Regex, RegexError> {
-        Regex::new(self.source)
+    pub fn compile(&self) -> Result<Regex, RegexError> {
+        Regex::new(self.source.as_ref())
     }
 }
 
