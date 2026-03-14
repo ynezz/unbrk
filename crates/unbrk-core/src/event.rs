@@ -386,6 +386,7 @@ impl fmt::Display for ImageKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureClass {
+    Io,
     Serial,
     Timeout,
     Protocol,
@@ -399,6 +400,7 @@ pub enum FailureClass {
 impl fmt::Display for FailureClass {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Io => "io",
             Self::Serial => "serial",
             Self::Timeout => "timeout",
             Self::Protocol => "protocol",

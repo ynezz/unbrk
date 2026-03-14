@@ -41,7 +41,7 @@ use unbrk_core::xmodem::{
 const EXIT_CODES_HELP: &str = "\
 Exit codes:
   0  success
-  1  serial error
+  1  I/O error
   2  timeout
   3  protocol error
   4  XMODEM failure
@@ -222,7 +222,7 @@ fn dispatch(
         CommandPlan::Man => {
             Man::new(cli_command())
                 .render(stdout)
-                .map_err(RunError::Serial)?;
+                .map_err(|source| stdout_io_error("rendering the manual page", &source))?;
             Ok(())
         }
         CommandPlan::Doctor => {
@@ -230,7 +230,7 @@ fn dispatch(
                 stdout,
                 "doctor command scaffold: diagnostics are not implemented yet."
             )
-            .map_err(RunError::Serial)?;
+            .map_err(|source| stdout_io_error("writing doctor output", &source))?;
             Ok(())
         }
     }
@@ -321,6 +321,13 @@ enum RecoverOutcome {
     Recovered,
     FlashedAfterRecovery { reset_evidence: String },
     FlashedFromExistingPrompt { reset_evidence: String },
+}
+
+fn stdout_io_error(operation: &str, source: &io::Error) -> RunError {
+    RunError::Io(io::Error::new(
+        source.kind(),
+        format!("stdout I/O failed while {operation}: {source}"),
+    ))
 }
 
 fn recover_port(plan: &RecoverPlan) -> Result<String, RunError> {
@@ -1238,6 +1245,7 @@ struct RecoverPlan {
 #[derive(Debug)]
 pub enum RunError {
     Input(InputError),
+    Io(io::Error),
     Serial(io::Error),
     Timeout(String),
     Protocol(String),
@@ -1252,6 +1260,7 @@ impl RunError {
     pub const fn failure_class(&self) -> FailureClass {
         match self {
             Self::Input(_) => FailureClass::BadInput,
+            Self::Io(_) => FailureClass::Io,
             Self::Serial(_) => FailureClass::Serial,
             Self::Timeout(_) => FailureClass::Timeout,
             Self::Protocol(_) => FailureClass::Protocol,
@@ -1266,7 +1275,7 @@ impl RunError {
     pub const fn exit_code(&self) -> CliExitCode {
         match self {
             Self::Input(_) => CliExitCode::BadInput,
-            Self::Serial(_) => CliExitCode::SerialError,
+            Self::Io(_) | Self::Serial(_) => CliExitCode::IoError,
             Self::Timeout(_) => CliExitCode::Timeout,
             Self::Protocol(_) => CliExitCode::ProtocolError,
             Self::Xmodem(_) => CliExitCode::XmodemFailure,
@@ -1309,6 +1318,7 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Input(error) => write!(formatter, "{error}"),
+            Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Serial(error) => write!(formatter, "serial error: {error}"),
             Self::Timeout(message) => write!(formatter, "timeout: {message}"),
             Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
@@ -1352,7 +1362,7 @@ impl std::error::Error for InputError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliExitCode {
     Success = 0,
-    SerialError = 1,
+    IoError = 1,
     Timeout = 2,
     ProtocolError = 3,
     XmodemFailure = 4,
@@ -1801,8 +1811,12 @@ mod tests {
             CliExitCode::BadInput
         );
         assert_eq!(
+            RunError::Io(std::io::Error::other("boom")).exit_code(),
+            CliExitCode::IoError
+        );
+        assert_eq!(
             RunError::Serial(std::io::Error::other("boom")).exit_code(),
-            CliExitCode::SerialError
+            CliExitCode::IoError
         );
         assert_eq!(
             RunError::Timeout(String::from("slow")).exit_code(),
@@ -1849,6 +1863,13 @@ mod tests {
             }
             other => panic!("expected a serial run error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn io_error_display_uses_a_non_serial_prefix() {
+        let error = RunError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
+
+        assert_eq!(error.to_string(), "I/O error: broken pipe");
     }
 
     #[test]
@@ -2223,6 +2244,53 @@ mod tests {
 
         assert_eq!(events[1].sequence, 2);
         assert_eq!(events[1].timestamp_unix_ms, 7_777);
+    }
+
+    #[test]
+    fn doctor_command_stdout_errors_are_not_reported_as_serial_errors() {
+        let mut stdout = BrokenWriter;
+        let mut stderr = Vec::new();
+        let error = try_run(
+            ["unbrk", "doctor"],
+            tty_status(true),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+
+        match error {
+            RunError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("stdout I/O failed while writing doctor output")
+                );
+                assert!(!format!("{}", RunError::Io(error)).contains("serial error"));
+            }
+            other => panic!("expected an I/O run error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn man_command_stdout_errors_are_not_reported_as_serial_errors() {
+        let mut stdout = BrokenWriter;
+        let mut stderr = Vec::new();
+        let error =
+            try_run(["unbrk", "man"], tty_status(true), &mut stdout, &mut stderr).unwrap_err();
+
+        match error {
+            RunError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("stdout I/O failed while rendering the manual page")
+                );
+                assert!(!format!("{}", RunError::Io(error)).contains("serial error"));
+            }
+            other => panic!("expected an I/O run error, got {other:?}"),
+        }
     }
 
     #[test]

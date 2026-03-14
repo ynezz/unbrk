@@ -15,7 +15,7 @@ pub const MAX_CONSOLE_TAIL_BYTES: usize = 200;
 #[repr(u8)]
 pub enum StableExitCode {
     Success = 0,
-    SerialError = 1,
+    IoError = 1,
     Timeout = 2,
     ProtocolError = 3,
     XmodemFailure = 4,
@@ -177,7 +177,7 @@ impl UnbrkError {
     #[must_use]
     pub const fn exit_code(&self) -> StableExitCode {
         match self.failure_class() {
-            FailureClass::Serial => StableExitCode::SerialError,
+            FailureClass::Io | FailureClass::Serial => StableExitCode::IoError,
             FailureClass::Timeout => StableExitCode::Timeout,
             FailureClass::Protocol => StableExitCode::ProtocolError,
             FailureClass::Xmodem => StableExitCode::XmodemFailure,
@@ -282,7 +282,7 @@ mod tests {
         };
 
         assert_eq!(error.failure_class(), FailureClass::Serial);
-        assert_eq!(error.exit_code(), StableExitCode::SerialError);
+        assert_eq!(error.exit_code(), StableExitCode::IoError);
         assert!(error.to_string().contains("permission denied"));
     }
 }
