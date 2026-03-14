@@ -651,7 +651,6 @@ fn prepare_stage_payloads(plan: &FlashPlan) -> Result<Vec<PreparedStage>, UnbrkE
     let mut prepared_stages = Vec::with_capacity(plan.write_stages.len());
 
     for stage in &plan.write_stages {
-        stage.validate_image_path(plan.block_size)?;
         let payload = read_image(stage.image_path.as_path(), stage.image)?;
         stage.validate_image_size(
             plan.block_size,
@@ -867,6 +866,31 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, crate::error::UnbrkError::BadInput { .. }));
+        assert!(transport.writes().is_empty());
+    }
+
+    #[test]
+    fn missing_images_fail_during_read_before_erasing_flash() {
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let missing_preloader = unique_temp_path();
+        let plan = AN7581.flash_plan(missing_preloader, fip.path.clone());
+        let mut transport = MockTransport::new([]);
+
+        let error = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap_err();
+
+        match error {
+            crate::error::UnbrkError::BadInput { message } => {
+                assert!(message.contains("failed to read preloader image"));
+                assert!(!message.contains("failed to inspect preloader image"));
+            }
+            other => panic!("expected a bad input error, got {other:?}"),
+        }
         assert!(transport.writes().is_empty());
     }
 
