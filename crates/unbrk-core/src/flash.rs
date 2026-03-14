@@ -354,6 +354,10 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         transfer_stage: TransferStage,
         payload: &[u8],
     ) -> Result<(), UnbrkError> {
+        if !xmodem_error.permits_prompt_completion_recovery() {
+            return Err(self.xmodem_error(xmodem_error, transfer_stage));
+        }
+
         let prompt = self
             .read_uboot_prompt("the U-Boot prompt after loadx")
             .map_err(|prompt_error| {
@@ -606,6 +610,18 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         }
     }
 
+    fn xmodem_error(
+        &self,
+        xmodem_error: &crate::xmodem::XmodemError,
+        stage: TransferStage,
+    ) -> UnbrkError {
+        UnbrkError::Xmodem {
+            stage,
+            detail: xmodem_error.to_string(),
+            recent_console: self.console_tail(),
+        }
+    }
+
     fn console_tail(&self) -> ConsoleTail {
         ConsoleTail::from_buffer(&self.console)
     }
@@ -822,6 +838,96 @@ mod tests {
             }
         )));
         transport.assert_finished();
+    }
+
+    #[test]
+    fn loadx_cancel_does_not_recover_to_the_next_prompt() {
+        let preloader = temp_file_with_bytes(&[0x11, 0x22, 0x33, 0x44]);
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
+        let mut transport = scripted_flash_transport(
+            build_crc_packet(1, &[0x11, 0x22, 0x33, 0x44]),
+            build_crc_packet(1, &[0xaa, 0xbb, 0xcc, 0xdd]),
+            vec![crate::xmodem::XMODEM_CAN],
+            fixture_reset_evidence(),
+        );
+
+        let error = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(
+                COMMAND_TIMEOUT,
+                RESET_TIMEOUT,
+                XmodemConfig::new(Duration::ZERO, 10, 1),
+            ),
+        )
+        .unwrap_err();
+
+        match error {
+            crate::error::UnbrkError::Xmodem { stage, detail, .. } => {
+                assert_eq!(stage, TransferStage::LoadxPreloader);
+                assert!(detail.contains("receiver cancelled"));
+            }
+            other => panic!("expected an XMODEM error, got {other:?}"),
+        }
+        assert!(!transport.is_finished());
+    }
+
+    #[test]
+    fn loadx_block_ack_timeout_does_not_recover_to_the_next_prompt() {
+        let preloader = temp_file_with_bytes(&[0x11, 0x22, 0x33, 0x44]);
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(vec![b'\r']),
+            MockStep::Flush,
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"\r\nAN7581> ".to_vec()),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"printenv loadaddr\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                b"AN7581> printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> ".to_vec(),
+            ),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"mmc erase 0x0 0x800\n".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(
+                b"AN7581> mmc erase 0x0 0x800\r\n2048 blocks erased: OK\r\nAN7581> ".to_vec(),
+            ),
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
+            MockStep::Flush,
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
+            MockStep::Write(build_crc_packet(1, &[0x11, 0x22, 0x33, 0x44])),
+            MockStep::Flush,
+            MockStep::ReadError {
+                kind: io::ErrorKind::TimedOut,
+                message: String::from("block ack timed out"),
+            },
+            MockStep::SetTimeout(COMMAND_TIMEOUT),
+            MockStep::Read(b"\r\nAN7581> ".to_vec()),
+        ]);
+
+        let error = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap_err();
+
+        match error {
+            crate::error::UnbrkError::Xmodem { stage, detail, .. } => {
+                assert_eq!(stage, TransferStage::LoadxPreloader);
+                assert!(detail.contains("timed out while waiting for block ACK/NAK"));
+            }
+            other => panic!("expected an XMODEM error, got {other:?}"),
+        }
+        assert!(!transport.is_finished());
     }
 
     #[test]

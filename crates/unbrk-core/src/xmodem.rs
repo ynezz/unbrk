@@ -172,6 +172,21 @@ pub enum XmodemError {
     UnexpectedResponse { operation: &'static str, byte: u8 },
 }
 
+impl XmodemError {
+    /// Returns whether a prompt observed immediately after transfer failure can
+    /// be treated as successful completion.
+    #[must_use]
+    pub(crate) fn permits_prompt_completion_recovery(&self) -> bool {
+        matches!(
+            self,
+            Self::EotRetryLimitExceeded { .. }
+                | Self::Timeout {
+                    operation: "EOT ACK/NAK",
+                }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReceiverResponse {
     Ack,
@@ -755,6 +770,53 @@ mod tests {
                 operation: "block ACK/NAK",
             }
         ));
+    }
+
+    #[test]
+    fn prompt_recovery_is_allowed_only_for_eot_completion_failures() {
+        assert!(
+            XmodemError::EotRetryLimitExceeded { attempts: 1 }.permits_prompt_completion_recovery()
+        );
+        assert!(
+            XmodemError::Timeout {
+                operation: "EOT ACK/NAK",
+            }
+            .permits_prompt_completion_recovery()
+        );
+
+        assert!(
+            !XmodemError::Timeout {
+                operation: "block ACK/NAK",
+            }
+            .permits_prompt_completion_recovery()
+        );
+        assert!(
+            !XmodemError::RetryLimitExceeded {
+                block_number: 1,
+                attempts: 3,
+            }
+            .permits_prompt_completion_recovery()
+        );
+        assert!(
+            !XmodemError::ReceiverCancelled {
+                operation: "EOT ACK/NAK",
+            }
+            .permits_prompt_completion_recovery()
+        );
+        assert!(
+            !XmodemError::UnexpectedResponse {
+                operation: "EOT ACK/NAK",
+                byte: b'P',
+            }
+            .permits_prompt_completion_recovery()
+        );
+        assert!(
+            !XmodemError::Io {
+                operation: "send EOT",
+                source: io::Error::other("boom"),
+            }
+            .permits_prompt_completion_recovery()
+        );
     }
 
     #[test]

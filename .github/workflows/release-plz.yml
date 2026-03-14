@@ -1,0 +1,68 @@
+name: release-plz
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-plz-release:
+    name: release-plz release
+    if: ${{ github.repository_owner == 'ynezz' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install release-plz
+        uses: taiki-e/install-action@1dcbf2bdd1cc32135a68fdcd77374bd01e13abda # v2.68.28
+        with:
+          tool: release-plz
+
+      - name: Run release-plz release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: release-plz release --git-token "${GITHUB_TOKEN}" --config release-plz.toml
+
+  release-plz-pr:
+    name: release-plz PR
+    if: ${{ github.repository_owner == 'ynezz' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install release-plz
+        uses: taiki-e/install-action@1dcbf2bdd1cc32135a68fdcd77374bd01e13abda # v2.68.28
+        with:
+          tool: release-plz
+
+      - name: Run release-plz release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: release-plz release-pr --git-token "${GITHUB_TOKEN}" --config release-plz.toml

@@ -289,6 +289,10 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
                 })
             }
             Err(error) => {
+                if !error.permits_prompt_completion_recovery() {
+                    return Err(self.xmodem_error(&error, transfer_stage));
+                }
+
                 self.push_state(wait_state);
                 let prompt_result = match wait_target {
                     WaitTarget::RecoveryPrompt {
@@ -494,11 +498,24 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
             recent_console: self.console_tail(),
         }
     }
+
+    fn xmodem_error(
+        &self,
+        xmodem_error: &crate::xmodem::XmodemError,
+        stage: TransferStage,
+    ) -> UnbrkError {
+        UnbrkError::Xmodem {
+            stage,
+            detail: xmodem_error.to_string(),
+            recent_console: self.console_tail(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{RecoveryConfig, RecoveryImages, RecoveryState, recover_to_uboot};
+    use crate::error::UnbrkError;
     use crate::event::{EventPayload, RecoveryStage, TransferStage};
     use crate::target::AN7581;
     use crate::transport::{MockStep, MockTransport};
@@ -648,5 +665,153 @@ mod tests {
             }
         )));
         transport.assert_finished();
+    }
+
+    #[test]
+    fn eot_ack_timeout_can_be_tolerated_when_the_next_prompt_arrives() {
+        let preloader = [0x11_u8; 4];
+        let fip = [0x22_u8; 4];
+        let preloader_packet = build_crc_packet(1, &preloader);
+        let fip_packet = build_crc_packet(1, &fip);
+
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"Press x\r\n".to_vec()),
+            MockStep::Write(vec![b'x']),
+            MockStep::Flush,
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"CCC".to_vec()),
+            MockStep::Write(preloader_packet),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::Write(vec![crate::xmodem::XMODEM_EOT]),
+            MockStep::Flush,
+            MockStep::ReadError {
+                kind: std::io::ErrorKind::TimedOut,
+                message: String::from("EOT ack timed out"),
+            },
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"Press x to load BL31 + U-Boot FIP\r\n".to_vec()),
+            MockStep::Write(vec![b'x']),
+            MockStep::Flush,
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"CCC".to_vec()),
+            MockStep::Write(fip_packet),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::Write(vec![crate::xmodem::XMODEM_EOT]),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"AN7581> \r\n".to_vec()),
+        ]);
+
+        let report = recover_to_uboot(
+            &mut transport,
+            AN7581,
+            RecoveryImages {
+                preloader_name: "preloader.bin",
+                preloader: &preloader,
+                fip_name: "fip.bin",
+                fip: &fip,
+            },
+            RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::new(Duration::ZERO, 10, 1)),
+        )
+        .unwrap();
+
+        assert!(report.preloader_recovered_from_eot_quirk);
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn receiver_cancel_does_not_recover_to_the_next_prompt() {
+        let preloader = [0x11_u8; 4];
+        let fip = [0x22_u8; 4];
+        let preloader_packet = build_crc_packet(1, &preloader);
+
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"Press x\r\n".to_vec()),
+            MockStep::Write(vec![b'x']),
+            MockStep::Flush,
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"CCC".to_vec()),
+            MockStep::Write(preloader_packet),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
+            MockStep::Write(vec![crate::xmodem::XMODEM_EOT]),
+            MockStep::Flush,
+            MockStep::Read(vec![crate::xmodem::XMODEM_CAN]),
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"Press x to load BL31 + U-Boot FIP\r\n".to_vec()),
+        ]);
+
+        let error = recover_to_uboot(
+            &mut transport,
+            AN7581,
+            RecoveryImages {
+                preloader_name: "preloader.bin",
+                preloader: &preloader,
+                fip_name: "fip.bin",
+                fip: &fip,
+            },
+            RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::new(Duration::ZERO, 10, 1)),
+        )
+        .unwrap_err();
+
+        match error {
+            UnbrkError::Xmodem { stage, detail, .. } => {
+                assert_eq!(stage, TransferStage::Preloader);
+                assert!(detail.contains("receiver cancelled"));
+            }
+            other => panic!("expected an XMODEM error, got {other:?}"),
+        }
+        assert!(!transport.is_finished());
+    }
+
+    #[test]
+    fn timeout_while_waiting_for_block_ack_does_not_recover_to_the_next_prompt() {
+        let preloader = [0x11_u8; 4];
+        let fip = [0x22_u8; 4];
+        let preloader_packet = build_crc_packet(1, &preloader);
+
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"Press x\r\n".to_vec()),
+            MockStep::Write(vec![b'x']),
+            MockStep::Flush,
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"CCC".to_vec()),
+            MockStep::Write(preloader_packet),
+            MockStep::Flush,
+            MockStep::ReadError {
+                kind: std::io::ErrorKind::TimedOut,
+                message: String::from("block ack timed out"),
+            },
+            MockStep::SetTimeout(PROMPT_TIMEOUT),
+            MockStep::Read(b"Press x to load BL31 + U-Boot FIP\r\n".to_vec()),
+        ]);
+
+        let error = recover_to_uboot(
+            &mut transport,
+            AN7581,
+            RecoveryImages {
+                preloader_name: "preloader.bin",
+                preloader: &preloader,
+                fip_name: "fip.bin",
+                fip: &fip,
+            },
+            RecoveryConfig::new(PROMPT_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap_err();
+
+        match error {
+            UnbrkError::Xmodem { stage, detail, .. } => {
+                assert_eq!(stage, TransferStage::Preloader);
+                assert!(detail.contains("timed out while waiting for block ACK/NAK"));
+            }
+            other => panic!("expected an XMODEM error, got {other:?}"),
+        }
+        assert!(!transport.is_finished());
     }
 }
