@@ -12,6 +12,7 @@ changelog_path = "CHANGELOG.md"
 changelog_include = ["unbrk-core"]
 git_only = true
 publish = false
+publish_no_verify = true
 git_release_enable = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"

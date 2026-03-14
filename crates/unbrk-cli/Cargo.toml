@@ -20,4 +20,4 @@ clap_mangen.workspace = true
 is-terminal.workspace = true
 regex.workspace = true
 serde_json.workspace = true
-unbrk-core = { path = "../unbrk-core", version = "0.1.0" }
+unbrk-core = { path = "../unbrk-core" }

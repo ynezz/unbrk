@@ -122,3 +122,22 @@ live Valyrian board on `/dev/ttyS4`:
 
 This confirms the current prompt patterns, XMODEM behavior, U-Boot parsing,
 flash verification, and reset detection on real hardware for this board.
+
+## Stored Transcript Captures
+
+Fresh transcript captures from the same hardware setup are now stored in the
+repository under `artifacts/hardware-transcripts/2026-03-14/`:
+
+- `run-01-clean/`: complete successful recovery to `AN7581>`
+- `run-02-clean/`: second complete successful recovery to `AN7581>`
+- `run-04-interrupted-manual/`: intentionally interrupted partial capture
+
+Observed markers in the interrupted capture:
+
+- `Press x` at byte offset 1
+- `CCC` at byte offset 11
+- `U-Boot` later in the stream at byte offset 121428
+
+The interrupted capture timed out before JSON event flushing completed, so it
+contains only the raw UART transcript. The two clean runs include both
+`events.jsonl` and `transcript.bin`.
