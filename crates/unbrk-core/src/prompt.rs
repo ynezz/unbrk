@@ -43,15 +43,13 @@ fn find_prompt_impl(
     None
 }
 
-pub(crate) fn find_prompt_with_regex(
-    regex: &Regex,
-    buffer: &[u8],
-    cursor: usize,
-) -> Option<PromptMatch> {
+#[must_use]
+pub fn find_prompt_with_regex(regex: &Regex, buffer: &[u8], cursor: usize) -> Option<PromptMatch> {
     find_prompt_impl(regex, buffer, cursor, false)
 }
 
-pub(crate) fn find_prompt_allowing_trailing_space_with_regex(
+#[must_use]
+pub fn find_prompt_allowing_trailing_space_with_regex(
     regex: &Regex,
     buffer: &[u8],
     cursor: usize,
@@ -113,7 +111,7 @@ pub fn advance_to_prompt(
     Ok(matched)
 }
 
-pub(crate) fn advance_to_prompt_with_regex(
+pub fn advance_to_prompt_with_regex(
     regex: &Regex,
     buffer: &[u8],
     cursor: &mut usize,
@@ -143,7 +141,7 @@ pub fn advance_to_prompt_allowing_trailing_space(
     Ok(matched)
 }
 
-pub(crate) fn advance_to_prompt_allowing_trailing_space_with_regex(
+pub fn advance_to_prompt_allowing_trailing_space_with_regex(
     regex: &Regex,
     buffer: &[u8],
     cursor: &mut usize,
@@ -160,7 +158,8 @@ pub(crate) fn advance_to_prompt_allowing_trailing_space_with_regex(
 #[cfg(test)]
 mod tests {
     use super::{
-        PromptMatch, advance_to_prompt, advance_to_prompt_allowing_trailing_space, find_prompt,
+        PromptMatch, advance_to_prompt, advance_to_prompt_allowing_trailing_space,
+        advance_to_prompt_allowing_trailing_space_with_regex, find_prompt,
         find_prompt_allowing_trailing_space,
     };
     use crate::target::AN7581;
@@ -277,5 +276,31 @@ mod tests {
 
         assert_eq!(matched.prompt, "AN7581>");
         assert_eq!(cursor, 7);
+    }
+
+    #[test]
+    fn compiled_helper_reuses_the_same_regex_for_cursor_advancement() {
+        let regex = AN7581.prompts.uboot.compile().unwrap();
+        let mut cursor = 0;
+
+        let first = advance_to_prompt_allowing_trailing_space_with_regex(
+            &regex,
+            b"AN7581> \r\nAN7581> \r\n",
+            &mut cursor,
+        )
+        .unwrap();
+
+        assert_eq!(first.prompt, "AN7581>");
+        assert_eq!(cursor, 7);
+
+        let second = advance_to_prompt_allowing_trailing_space_with_regex(
+            &regex,
+            b"AN7581> \r\nAN7581> \r\n",
+            &mut cursor,
+        )
+        .unwrap();
+
+        assert_eq!(second.prompt, "AN7581>");
+        assert_eq!(cursor, 17);
     }
 }

@@ -18,7 +18,7 @@ use unbrk_core::event::{
     EVENT_SCHEMA_VERSION, Event, EventPayload, FailureClass, ImageKind, RecoveryStage,
 };
 use unbrk_core::flash::{DEFAULT_RESET_TIMEOUT, FlashConfig, flash_from_uboot};
-use unbrk_core::prompt::advance_to_prompt_allowing_trailing_space;
+use unbrk_core::prompt::advance_to_prompt_allowing_trailing_space_with_regex;
 use unbrk_core::recovery::{
     DEFAULT_PROMPT_TIMEOUT, RecoveryConfig, RecoveryImages, recover_to_uboot,
 };
@@ -548,6 +548,11 @@ fn wait_for_uboot_prompt(
     pattern: PromptPattern,
     timeout: Duration,
 ) -> Result<String, UnbrkError> {
+    let regex = pattern.compile().map_err(|error| UnbrkError::Protocol {
+        stage: RecoveryStage::UBoot,
+        detail: format!("invalid prompt regex: {error}"),
+        recent_console: ConsoleTail::empty(),
+    })?;
     transport
         .set_timeout(timeout)
         .map_err(|source| UnbrkError::Serial {
@@ -571,13 +576,7 @@ fn wait_for_uboot_prompt(
 
     loop {
         if let Some(prompt) =
-            advance_to_prompt_allowing_trailing_space(pattern, &console, &mut cursor).map_err(
-                |error| UnbrkError::Protocol {
-                    stage: RecoveryStage::UBoot,
-                    detail: format!("invalid prompt regex: {error}"),
-                    recent_console: ConsoleTail::empty(),
-                },
-            )?
+            advance_to_prompt_allowing_trailing_space_with_regex(&regex, &console, &mut cursor)
         {
             return Ok(prompt.prompt);
         }
