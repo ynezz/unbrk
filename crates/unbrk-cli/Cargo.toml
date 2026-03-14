@@ -3,12 +3,16 @@ name = "unbrk-cli"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
 [[bin]]
 name = "unbrk"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
 
 [lints]
 workspace = true

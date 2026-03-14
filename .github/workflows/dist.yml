@@ -1,0 +1,185 @@
+name: dist
+
+on:
+  pull_request:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dist-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DIST_VERSION: 0.31.0
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - id: tag
+        name: Resolve release tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            version="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "unbrk-cli") | .version')"
+            tag="v${version}"
+          fi
+          echo "value=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Plan release artifacts
+        shell: bash
+        run: |
+          dist plan --tag "${{ steps.tag.outputs.value }}" --output-format=json > dist-plan.json
+
+      - name: Upload plan manifest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: plan-manifest
+          path: dist-plan.json
+
+  build-local:
+    name: build-local (${{ matrix.target }})
+    needs:
+      - plan
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build local artifacts
+        shell: bash
+        run: |
+          dist build --tag "${{ needs.plan.outputs.tag }}" --artifacts=local --target "${{ matrix.target }}" --output-format=json > dist-manifest.json
+
+      - id: files
+        name: Collect upload paths
+        shell: bash
+        run: |
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload local artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: dist-local-${{ matrix.target }}
+          path: ${{ steps.files.outputs.paths }}
+
+  build-global:
+    name: build-global
+    needs:
+      - plan
+      - build-local
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-local-*
+          path: target/distrib
+          merge-multiple: true
+
+      - name: Build global artifacts
+        shell: bash
+        run: |
+          dist build --tag "${{ needs.plan.outputs.tag }}" --artifacts=global --output-format=json > dist-manifest.json
+
+      - id: files
+        name: Collect upload paths
+        shell: bash
+        run: |
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload global artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: dist-global
+          path: ${{ steps.files.outputs.paths }}
+
+  upload-release-assets:
+    name: upload-release-assets
+    needs:
+      - plan
+      - build-global
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload artifacts to GitHub Release
+        shell: bash
+        run: |
+          mapfile -t files < <(find artifacts -type f | sort)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "no release artifacts were produced"
+            exit 1
+          fi
+          gh release upload "${{ needs.plan.outputs.tag }}" --clobber "${files[@]}"

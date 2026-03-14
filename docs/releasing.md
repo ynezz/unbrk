@@ -112,6 +112,45 @@ push to `main`. Key details:
   created tags/releases can trigger downstream workflows (e.g., binary
   builds)
 
+## Release Artifacts
+
+Cross-platform binary artifacts are built by
+`.github/workflows/dist.yml`, which uses `cargo-dist` as the packager and
+attaches the resulting archives, checksum files, and installer scripts to
+the published GitHub Release.
+
+This workflow intentionally complements `release-plz` instead of letting
+`cargo-dist` manage its own generated `release.yml`:
+
+- `release-plz` already owns versioning, changelog generation, git tags,
+  and GitHub Release creation for this repository
+- `cargo-dist` only handles artifact planning/building/uploading
+- the repository keeps the human-facing workflow name as `dist.yml`
+
+`dist.yml` has two modes:
+
+- On pull requests it runs `dist plan` against the current `unbrk-cli`
+  version, so release breakage is caught before merge
+- On `release.published` it builds the four primary targets:
+  `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`,
+  `x86_64-apple-darwin`, and `aarch64-apple-darwin`, then uploads the
+  artifacts to the existing GitHub Release
+
+The `cargo-dist` configuration lives in `dist-workspace.toml`. We keep the
+workspace explicit:
+
+- only `unbrk-cli` is distributed
+- `unbrk-cli` explicitly sets `package.metadata.dist.dist = true` because
+  the workspace inherits `publish = false`
+- archives are `.tar.gz` on Unix and `.zip` on Windows
+- shell and PowerShell installers are enabled
+- SHA-256 checksums are generated alongside the archives
+
+Because the artifact workflow is triggered by `release-plz`-created
+releases, `RELEASE_PLZ_TOKEN` is the recommended token. A release created
+with the default `GITHUB_TOKEN` will not trigger downstream workflows such
+as `dist.yml`.
+
 ## Manual Release (Current Process)
 
 The automated `release-plz release-pr` job is currently blocked by an
