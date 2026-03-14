@@ -2,7 +2,7 @@
 
 use crate::error::{ConsoleTail, UnbrkError};
 use crate::event::{Event, EventPayload, ImageKind, RecoveryStage, TransferStage};
-use crate::prompt::{PromptMatch, advance_to_prompt_allowing_trailing_space};
+use crate::prompt::{PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex};
 use crate::target::{FlashPlan, TargetProfile, WriteStage};
 use crate::transport::Transport;
 use crate::uboot::{
@@ -435,6 +435,12 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     }
 
     fn read_uboot_prompt(&mut self, operation: &'static str) -> Result<PromptMatch, UnbrkError> {
+        let regex = self
+            .target
+            .prompts
+            .uboot
+            .compile()
+            .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?;
         self.transport
             .set_timeout(self.config.command_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -443,13 +449,11 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
             })?;
 
         loop {
-            if let Some(prompt) = advance_to_prompt_allowing_trailing_space(
-                self.target.prompts.uboot,
+            if let Some(prompt) = advance_to_prompt_allowing_trailing_space_with_regex(
+                &regex,
                 &self.console,
                 &mut self.cursor,
-            )
-            .map_err(|error| Self::invalid_prompt_regex(&error, RecoveryStage::UBoot))?
-            {
+            ) {
                 return Ok(prompt);
             }
 

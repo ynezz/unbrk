@@ -21,29 +21,42 @@ impl PromptMatch {
 }
 
 fn find_prompt_impl(
-    pattern: PromptPattern,
+    regex: &Regex,
     buffer: &[u8],
     cursor: usize,
     allow_trailing_space: bool,
-) -> Result<Option<PromptMatch>, RegexError> {
-    let Some(bytes) = buffer.get(cursor..) else {
-        return Ok(None);
-    };
-    let regex = Regex::new(pattern.as_str())?;
+) -> Option<PromptMatch> {
+    let bytes = buffer.get(cursor..)?;
 
     for matched in regex.find_iter(bytes) {
         let trailing = bytes.get(matched.end()).copied();
         if trailing
             .is_none_or(|byte| byte.is_ascii_control() || (allow_trailing_space && byte == b' '))
         {
-            return Ok(Some(PromptMatch::new(
+            return Some(PromptMatch::new(
                 &bytes[matched.start()..matched.end()],
                 cursor + matched.end(),
-            )));
+            ));
         }
     }
 
-    Ok(None)
+    None
+}
+
+pub(crate) fn find_prompt_with_regex(
+    regex: &Regex,
+    buffer: &[u8],
+    cursor: usize,
+) -> Option<PromptMatch> {
+    find_prompt_impl(regex, buffer, cursor, false)
+}
+
+pub(crate) fn find_prompt_allowing_trailing_space_with_regex(
+    regex: &Regex,
+    buffer: &[u8],
+    cursor: usize,
+) -> Option<PromptMatch> {
+    find_prompt_impl(regex, buffer, cursor, true)
 }
 
 /// Finds the next stage-local prompt match from `cursor`.
@@ -61,7 +74,8 @@ pub fn find_prompt(
     buffer: &[u8],
     cursor: usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
-    find_prompt_impl(pattern, buffer, cursor, false)
+    let regex = pattern.compile()?;
+    Ok(find_prompt_with_regex(&regex, buffer, cursor))
 }
 
 /// Finds the next prompt match from `cursor`, also accepting a trailing space.
@@ -77,7 +91,10 @@ pub fn find_prompt_allowing_trailing_space(
     buffer: &[u8],
     cursor: usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
-    find_prompt_impl(pattern, buffer, cursor, true)
+    let regex = pattern.compile()?;
+    Ok(find_prompt_allowing_trailing_space_with_regex(
+        &regex, buffer, cursor,
+    ))
 }
 
 /// Advances `cursor` past the next matched prompt if one is present.
@@ -90,13 +107,24 @@ pub fn advance_to_prompt(
     buffer: &[u8],
     cursor: &mut usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
-    let matched = find_prompt(pattern, buffer, *cursor)?;
+    let regex = pattern.compile()?;
+    let matched = advance_to_prompt_with_regex(&regex, buffer, cursor);
+
+    Ok(matched)
+}
+
+pub(crate) fn advance_to_prompt_with_regex(
+    regex: &Regex,
+    buffer: &[u8],
+    cursor: &mut usize,
+) -> Option<PromptMatch> {
+    let matched = find_prompt_with_regex(regex, buffer, *cursor);
 
     if let Some(ref matched) = matched {
         *cursor = matched.next_cursor;
     }
 
-    Ok(matched)
+    matched
 }
 
 /// Advances `cursor` past the next matched prompt, allowing a trailing space.
@@ -109,13 +137,24 @@ pub fn advance_to_prompt_allowing_trailing_space(
     buffer: &[u8],
     cursor: &mut usize,
 ) -> Result<Option<PromptMatch>, RegexError> {
-    let matched = find_prompt_allowing_trailing_space(pattern, buffer, *cursor)?;
+    let regex = pattern.compile()?;
+    let matched = advance_to_prompt_allowing_trailing_space_with_regex(&regex, buffer, cursor);
+
+    Ok(matched)
+}
+
+pub(crate) fn advance_to_prompt_allowing_trailing_space_with_regex(
+    regex: &Regex,
+    buffer: &[u8],
+    cursor: &mut usize,
+) -> Option<PromptMatch> {
+    let matched = find_prompt_allowing_trailing_space_with_regex(regex, buffer, *cursor);
 
     if let Some(ref matched) = matched {
         *cursor = matched.next_cursor;
     }
 
-    Ok(matched)
+    matched
 }
 
 #[cfg(test)]

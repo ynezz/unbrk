@@ -2,7 +2,9 @@
 
 use crate::error::{ConsoleTail, UnbrkError};
 use crate::event::{Event, EventPayload, RecoveryStage, TransferStage};
-use crate::prompt::{PromptMatch, advance_to_prompt, advance_to_prompt_allowing_trailing_space};
+use crate::prompt::{
+    PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex, advance_to_prompt_with_regex,
+};
 use crate::target::{PromptPattern, TargetProfile};
 use crate::transport::Transport;
 use crate::xmodem::{
@@ -356,6 +358,9 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
         stage: RecoveryStage,
         operation: &'static str,
     ) -> Result<PromptMatch, UnbrkError> {
+        let regex = pattern
+            .compile()
+            .map_err(|error| Self::invalid_prompt_regex(&error))?;
         self.transport
             .set_timeout(self.config.prompt_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -364,8 +369,8 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
             })?;
 
         loop {
-            if let Some(prompt) = advance_to_prompt(pattern, &self.console, &mut self.cursor)
-                .map_err(|error| Self::invalid_prompt_regex(&error))?
+            if let Some(prompt) =
+                advance_to_prompt_with_regex(&regex, &self.console, &mut self.cursor)
             {
                 return Ok(prompt);
             }
@@ -379,6 +384,9 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
         pattern: PromptPattern,
         operation: &'static str,
     ) -> Result<PromptMatch, UnbrkError> {
+        let regex = pattern
+            .compile()
+            .map_err(|error| Self::invalid_prompt_regex(&error))?;
         self.transport
             .set_timeout(self.config.prompt_timeout)
             .map_err(|source| UnbrkError::Serial {
@@ -387,10 +395,11 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
             })?;
 
         loop {
-            if let Some(prompt) =
-                advance_to_prompt_allowing_trailing_space(pattern, &self.console, &mut self.cursor)
-                    .map_err(|error| Self::invalid_prompt_regex(&error))?
-            {
+            if let Some(prompt) = advance_to_prompt_allowing_trailing_space_with_regex(
+                &regex,
+                &self.console,
+                &mut self.cursor,
+            ) {
                 return Ok(prompt);
             }
 

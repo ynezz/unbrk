@@ -2,10 +2,10 @@
 
 use crate::error::{ConsoleTail, UnbrkError};
 use crate::event::RecoveryStage;
-use crate::prompt::find_prompt_allowing_trailing_space;
+use crate::prompt::find_prompt_allowing_trailing_space_with_regex;
 use crate::target::PromptPattern;
 use crate::transport::Transport;
-use regex::Regex;
+use regex::{Regex, bytes::Regex as BytesRegex};
 use std::time::Duration;
 
 /// Default timeout for one U-Boot command round-trip.
@@ -96,6 +96,9 @@ pub fn run_command(
     command: &str,
     timeout: Duration,
 ) -> Result<UBootCommandOutput, UnbrkError> {
+    let regex = prompt
+        .compile()
+        .map_err(|error| compile_prompt_error(&error))?;
     transport
         .set_timeout(timeout)
         .map_err(|source| UnbrkError::Serial {
@@ -147,11 +150,8 @@ pub fn run_command(
             }
         }
 
-        let search_cursor =
-            prompt_search_cursor(prompt, &output).map_err(|error| compile_prompt_error(&error))?;
-        if find_prompt_allowing_trailing_space(prompt, &output, search_cursor)
-            .map_err(|error| compile_prompt_error(&error))?
-            .is_some()
+        let search_cursor = prompt_search_cursor(&regex, &output);
+        if find_prompt_allowing_trailing_space_with_regex(&regex, &output, search_cursor).is_some()
         {
             return Ok(UBootCommandOutput::new(output));
         }
@@ -243,19 +243,20 @@ pub fn parse_total_size(output: &UBootCommandOutput) -> Result<TransferSize, Unb
     })
 }
 
-fn prompt_search_cursor(prompt: PromptPattern, output: &[u8]) -> Result<usize, regex::Error> {
+fn prompt_search_cursor(regex: &BytesRegex, output: &[u8]) -> usize {
     let Some(line_end) = first_line_end(output) else {
-        return Ok(0);
+        return 0;
     };
 
-    let Some(first_prompt) = find_prompt_allowing_trailing_space(prompt, output, 0)? else {
-        return Ok(0);
+    let Some(first_prompt) = find_prompt_allowing_trailing_space_with_regex(regex, output, 0)
+    else {
+        return 0;
     };
 
     if first_prompt.next_cursor <= line_end {
-        Ok(line_end)
+        line_end
     } else {
-        Ok(0)
+        0
     }
 }
 
