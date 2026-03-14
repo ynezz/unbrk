@@ -611,6 +611,7 @@ fn prepare_stage_payloads(plan: &FlashPlan) -> Result<Vec<PreparedStage>, UnbrkE
     let mut prepared_stages = Vec::with_capacity(plan.write_stages.len());
 
     for stage in &plan.write_stages {
+        stage.validate_image_path(plan.block_size)?;
         let payload = read_image(stage.image_path.as_path(), stage.image)?;
         stage.validate_image_size(
             plan.block_size,
