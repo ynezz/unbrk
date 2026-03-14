@@ -3,6 +3,9 @@ set shell := ["bash", "-cu"]
 default:
     @just --list
 
+setup:
+    git config core.hooksPath .githooks
+
 fmt:
     cargo fmt --all
 
@@ -21,7 +24,10 @@ doc-test:
 deny:
     cargo deny check
 
-ci: fmt-check lint test doc-test deny
+typos:
+    typos
+
+ci: fmt-check lint deny typos test doc-test
 
 dist:
     cargo build --workspace --release
