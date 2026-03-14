@@ -158,6 +158,8 @@ pub enum XmodemError {
         #[source]
         source: io::Error,
     },
+    #[error("XMODEM transfers require at least one data byte")]
+    EmptyPayload,
     #[error("timed out while waiting for {operation}")]
     Timeout { operation: &'static str },
     #[error("receiver rejected block {block_number} after {attempts} attempt(s)")]
@@ -310,6 +312,10 @@ where
     F: FnMut(XmodemProgress),
 {
     let config = config.normalized();
+
+    if payload.is_empty() {
+        return Err(XmodemError::EmptyPayload);
+    }
 
     if !config.packet_timeout.is_zero() {
         transport
@@ -590,8 +596,13 @@ mod tests {
 
     #[test]
     fn send_crc_updates_the_transport_timeout_when_configured() {
+        let payload = [0x42];
+        let expected_packet = build_crc_packet(1, &payload);
         let mut transport = MockTransport::new([
             MockStep::SetTimeout(TEST_PACKET_TIMEOUT),
+            MockStep::Write(expected_packet),
+            MockStep::Flush,
+            MockStep::Read(vec![XMODEM_ACK]),
             MockStep::Write(vec![XMODEM_EOT]),
             MockStep::Flush,
             MockStep::Read(vec![XMODEM_ACK]),
@@ -600,12 +611,13 @@ mod tests {
         let report = send_crc(
             &mut transport,
             TransferStage::Preloader,
-            &[],
+            &payload,
             XmodemConfig::new(TEST_PACKET_TIMEOUT, 1, 1),
             |_| {},
         )
         .unwrap();
 
+        assert_eq!(report.blocks_sent, 1);
         assert_eq!(report.eot_attempts, 1);
         assert_eq!(transport.timeout_updates(), &[TEST_PACKET_TIMEOUT]);
         transport.assert_finished();
@@ -839,5 +851,23 @@ mod tests {
                 operation: "block ACK/NAK",
             }
         ));
+    }
+
+    #[test]
+    fn send_crc_rejects_empty_payloads() {
+        let mut transport = MockTransport::new([]);
+
+        let error = send_crc(
+            &mut transport,
+            TransferStage::Preloader,
+            &[],
+            XmodemConfig::default(),
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, XmodemError::EmptyPayload));
+        assert!(transport.writes().is_empty());
+        transport.assert_finished();
     }
 }
