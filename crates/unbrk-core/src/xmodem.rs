@@ -478,6 +478,8 @@ mod tests {
         include_bytes!("../../../tests/fixtures/an7581/happy-path-stage1-crc-readiness.bin");
     const STAGE2_CRC_READY: &[u8] =
         include_bytes!("../../../tests/fixtures/an7581/happy-path-stage2-crc-readiness.bin");
+    const REAL_PRELOADER_ECHOED_X_CRC: &[u8] =
+        include_bytes!("../../../tests/fixtures/an7581/real-preloader-echoed-x-crc.bin");
     const PACKET_LEN: usize = 3 + XMODEM_BLOCK_SIZE + 2;
     const TEST_PACKET_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -526,6 +528,19 @@ mod tests {
             CrcReadyMatch {
                 readiness_bytes_seen: XMODEM_CRC_READY_MIN_BYTES,
                 next_cursor: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn crc_ready_can_follow_an_echoed_input_byte_from_real_hardware() {
+        let readiness = find_crc_ready(REAL_PRELOADER_ECHOED_X_CRC, 0).unwrap();
+
+        assert_eq!(
+            readiness,
+            CrcReadyMatch {
+                readiness_bytes_seen: XMODEM_CRC_READY_MIN_BYTES,
+                next_cursor: 4,
             }
         );
     }

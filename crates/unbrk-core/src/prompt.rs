@@ -168,6 +168,12 @@ mod tests {
         include_bytes!("../../../tests/fixtures/an7581/happy-path-stage1-prompt.bin");
     const STAGE2_PROMPT: &[u8] =
         include_bytes!("../../../tests/fixtures/an7581/happy-path-stage2-prompt.bin");
+    const REAL_STAGE1_LEADING_GARBAGE: &[u8] =
+        include_bytes!("../../../tests/fixtures/an7581/real-stage1-leading-garbage.bin");
+    const REAL_STAGE2_NOTICE_AND_PROMPT: &[u8] =
+        include_bytes!("../../../tests/fixtures/an7581/real-stage2-notice-and-prompt.bin");
+    const REAL_UBOOT_ANSI_PROMPT: &[u8] =
+        include_bytes!("../../../tests/fixtures/an7581/real-uboot-ansi-prompt.bin");
 
     #[test]
     fn initial_prompt_matches_the_stage1_fixture() {
@@ -233,6 +239,34 @@ mod tests {
     }
 
     #[test]
+    fn initial_prompt_can_follow_stale_bytes_from_real_hardware() {
+        let matched = find_prompt(
+            AN7581.prompts.initial_recovery,
+            REAL_STAGE1_LEADING_GARBAGE,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(matched.prompt, "Press x");
+        assert_eq!(matched.next_cursor, 14);
+    }
+
+    #[test]
+    fn second_prompt_can_follow_real_boot_notice_chatter() {
+        let matched = find_prompt(
+            AN7581.prompts.second_stage,
+            REAL_STAGE2_NOTICE_AND_PROMPT,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(matched.prompt, "Press x to load BL31 + U-Boot FIP");
+        assert_eq!(matched.next_cursor, 52);
+    }
+
+    #[test]
     fn uboot_prompt_matching_accepts_a_trailing_space() {
         let matched = find_prompt_allowing_trailing_space(AN7581.prompts.uboot, b"AN7581> ", 0)
             .unwrap()
@@ -240,6 +274,17 @@ mod tests {
 
         assert_eq!(matched.prompt, "AN7581>");
         assert_eq!(matched.next_cursor, 7);
+    }
+
+    #[test]
+    fn uboot_prompt_matching_tolerates_real_ansi_prefix_bytes() {
+        let matched =
+            find_prompt_allowing_trailing_space(AN7581.prompts.uboot, REAL_UBOOT_ANSI_PROMPT, 0)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(matched.prompt, "AN7581>");
+        assert_eq!(matched.next_cursor, 23);
     }
 
     #[test]
