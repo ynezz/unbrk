@@ -2,7 +2,9 @@
 
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::collections::VecDeque;
+use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
 /// Default baud rate for the documented Valyrian recovery flow.
@@ -44,6 +46,112 @@ impl SerialTransport {
     #[must_use]
     pub const fn path(&self) -> &str {
         self.path.as_str()
+    }
+}
+
+/// Transport wrapper that tees raw RX/TX bytes into a transcript sink.
+#[derive(Debug)]
+pub struct TranscriptTransport<T, W> {
+    inner: T,
+    transcript: W,
+    rx_log: Vec<u8>,
+    tx_log: Vec<u8>,
+    transcript_log: Vec<u8>,
+}
+
+impl<T, W> TranscriptTransport<T, W> {
+    /// Creates a transcript wrapper around an existing transport and sink.
+    #[must_use]
+    pub const fn new(inner: T, transcript: W) -> Self {
+        Self {
+            inner,
+            transcript,
+            rx_log: Vec::new(),
+            tx_log: Vec::new(),
+            transcript_log: Vec::new(),
+        }
+    }
+
+    /// Consumes the wrapper and returns the wrapped transport and transcript.
+    #[must_use]
+    pub fn into_parts(self) -> (T, W) {
+        (self.inner, self.transcript)
+    }
+
+    /// Returns the wrapped transport.
+    #[must_use]
+    pub const fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the wrapped transport.
+    pub const fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    /// Returns the transcript sink.
+    #[must_use]
+    pub const fn transcript(&self) -> &W {
+        &self.transcript
+    }
+
+    /// Returns a mutable reference to the transcript sink.
+    pub const fn transcript_mut(&mut self) -> &mut W {
+        &mut self.transcript
+    }
+
+    /// Returns the bytes observed from successful reads.
+    #[must_use]
+    pub const fn rx_log(&self) -> &[u8] {
+        self.rx_log.as_slice()
+    }
+
+    /// Returns the bytes observed from successful writes.
+    #[must_use]
+    pub const fn tx_log(&self) -> &[u8] {
+        self.tx_log.as_slice()
+    }
+
+    /// Returns the combined RX/TX transcript in call order.
+    #[must_use]
+    pub const fn transcript_log(&self) -> &[u8] {
+        self.transcript_log.as_slice()
+    }
+}
+
+impl<T> TranscriptTransport<T, io::BufWriter<File>> {
+    /// Creates a transcript wrapper that writes raw bytes to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the transcript file cannot be created.
+    pub fn with_file(inner: T, path: impl AsRef<Path>) -> io::Result<Self> {
+        Ok(Self::new(inner, io::BufWriter::new(File::create(path)?)))
+    }
+}
+
+impl<T, W> TranscriptTransport<T, W>
+where
+    W: Write,
+{
+    fn record_read(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.rx_log.extend_from_slice(bytes);
+        self.record_transcript(bytes)
+    }
+
+    fn record_write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.tx_log.extend_from_slice(bytes);
+        self.record_transcript(bytes)
+    }
+
+    fn record_transcript(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        self.transcript_log.extend_from_slice(bytes);
+        self.transcript.write_all(bytes)?;
+        self.transcript.flush()
     }
 }
 
@@ -418,6 +526,41 @@ impl Transport for MockTransport {
     }
 }
 
+impl<T, W> Transport for TranscriptTransport<T, W>
+where
+    T: Transport,
+    W: Write,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read_len = self.inner.read(buffer)?;
+
+        if read_len > 0 {
+            self.record_read(&buffer[..read_len])?;
+        }
+
+        Ok(read_len)
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write(bytes)?;
+
+        if !bytes.is_empty() {
+            self.record_write(bytes)?;
+        }
+
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()?;
+        self.transcript.flush()
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.inner.set_timeout(timeout)
+    }
+}
+
 fn serial_port_builder(
     _path: &str,
     baud_rate: u32,
@@ -459,12 +602,14 @@ fn map_serialport_error(path: &str, error: &serialport::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_BAUD_RATE, MockStep, MockTransport, Transport, map_serialport_error,
-        serial_port_builder,
+        DEFAULT_BAUD_RATE, MockStep, MockTransport, TranscriptTransport, Transport,
+        map_serialport_error, serial_port_builder,
     };
     use serialport::{DataBits, FlowControl, Parity, StopBits};
     use std::io;
-    use std::time::Duration;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct StubTransport {
         next_read: Vec<u8>,
@@ -627,6 +772,96 @@ mod tests {
     }
 
     #[test]
+    fn transcript_transport_records_rx_and_tx_bytes_in_observed_order() {
+        let inner = MockTransport::new([
+            MockStep::Write(b"x".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(b"CCC".to_vec()),
+        ]);
+        let mut transport = TranscriptTransport::new(inner, Cursor::new(Vec::new()));
+        let mut buffer = [0_u8; 8];
+
+        transport.write(b"x").unwrap();
+        transport.flush().unwrap();
+        assert_eq!(transport.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer[..3], b"CCC");
+        assert_eq!(transport.tx_log(), b"x");
+        assert_eq!(transport.rx_log(), b"CCC");
+        assert_eq!(transport.transcript_log(), b"xCCC");
+
+        let (inner, transcript) = transport.into_parts();
+        assert_eq!(transcript.into_inner(), b"xCCC");
+        inner.assert_finished();
+    }
+
+    #[test]
+    fn transcript_transport_preserves_fragmented_reads_exactly() {
+        let inner = MockTransport::from_rx_chunks([b"Press ".to_vec(), b"x\r\n".to_vec()]);
+        let mut transport = TranscriptTransport::new(inner, Cursor::new(Vec::new()));
+        let mut buffer = [0_u8; 6];
+
+        assert_eq!(transport.read(&mut buffer).unwrap(), 6);
+        assert_eq!(&buffer, b"Press ");
+        assert_eq!(transport.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer[..3], b"x\r\n");
+        assert_eq!(transport.rx_log(), b"Press x\r\n");
+        assert!(transport.tx_log().is_empty());
+        assert_eq!(transport.transcript_log(), b"Press x\r\n");
+
+        let (inner, transcript) = transport.into_parts();
+        assert_eq!(transcript.into_inner(), b"Press x\r\n");
+        inner.assert_finished();
+    }
+
+    #[test]
+    fn transcript_transport_does_not_record_failed_writes() {
+        let inner = MockTransport::new([MockStep::WriteError {
+            kind: io::ErrorKind::BrokenPipe,
+            message: String::from("serial write failed"),
+        }]);
+        let mut transport = TranscriptTransport::new(inner, Cursor::new(Vec::new()));
+
+        let error = transport.write(b"ABC").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(transport.tx_log().is_empty());
+        assert!(transport.transcript_log().is_empty());
+
+        let (_, transcript) = transport.into_parts();
+        assert!(transcript.into_inner().is_empty());
+    }
+
+    #[test]
+    fn transcript_transport_propagates_timeout_updates_to_the_inner_transport() {
+        let inner = MockTransport::new([MockStep::SetTimeout(Duration::from_secs(2))]);
+        let mut transport = TranscriptTransport::new(inner, Cursor::new(Vec::new()));
+
+        transport.set_timeout(Duration::from_secs(2)).unwrap();
+
+        let (inner, transcript) = transport.into_parts();
+        assert_eq!(inner.timeout_updates(), &[Duration::from_secs(2)]);
+        assert!(transcript.into_inner().is_empty());
+        inner.assert_finished();
+    }
+
+    #[test]
+    fn transcript_transport_can_write_to_a_real_file_sink() {
+        let path = temp_transcript_path("transport-transcript");
+        let inner = MockTransport::new([MockStep::Read(vec![0x18, b'C', b'\n'])]);
+        let mut transport = TranscriptTransport::with_file(inner, &path).unwrap();
+        let mut buffer = [0_u8; 8];
+
+        assert_eq!(transport.read(&mut buffer).unwrap(), 3);
+        assert_eq!(transport.rx_log(), &[0x18, b'C', b'\n']);
+
+        let (inner, _) = transport.into_parts();
+        inner.assert_finished();
+
+        let transcript = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(transcript, vec![0x18, b'C', b'\n']);
+    }
+
+    #[test]
     fn mock_transport_validates_expected_writes_and_flushes() {
         let mut transport = MockTransport::new([
             MockStep::Write(vec![b'x']),
@@ -718,5 +953,14 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(error.to_string().contains("expected flush"));
+    }
+
+    fn temp_transcript_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}.bin", std::process::id()))
     }
 }
