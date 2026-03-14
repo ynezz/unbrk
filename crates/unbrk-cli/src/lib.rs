@@ -1009,9 +1009,12 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 mod tests {
     use super::{
         CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
-        TerminalStatus, build_flash_plan, parse_command, try_run,
+        TerminalStatus, build_flash_plan, parse_command, target_profile, try_run,
+        wait_for_uboot_prompt,
     };
-    use unbrk_core::target::{AN7581, BlockCount, BlockOffset};
+    use std::time::Duration;
+    use unbrk_core::target::{AN7581, BlockCount, BlockOffset, PromptPattern};
+    use unbrk_core::{MockStep, MockTransport};
 
     const PORT: &str = "/dev/ttyUSB0";
     const PRELOADER: &str = "preloader.bin";
@@ -1425,7 +1428,7 @@ mod tests {
             tty_status(false),
         );
 
-        let flash_plan = build_flash_plan(&plan.args).unwrap();
+        let flash_plan = build_flash_plan(&plan.args, target_profile(&plan.args)).unwrap();
 
         assert_eq!(flash_plan.block_size, AN7581.flash.block_size);
         assert_eq!(flash_plan.erase_ranges[0].start_block, BlockOffset::new(0));
@@ -1449,5 +1452,54 @@ mod tests {
             flash_plan.write_stages[1].block_count,
             BlockCount::new(0x710)
         );
+    }
+
+    #[test]
+    fn target_profile_applies_runtime_baud_and_prompt_override() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--baud",
+                "57600",
+                "--uboot-prompt",
+                "VALYRIAN>",
+            ],
+            tty_status(false),
+        );
+
+        let target = target_profile(&plan.args);
+
+        assert_eq!(target.serial.baud_rate, 57_600);
+        assert_eq!(target.prompts.uboot.as_str(), "VALYRIAN>");
+        assert_eq!(
+            target.prompts.initial_recovery,
+            AN7581.prompts.initial_recovery
+        );
+        assert_eq!(target.prompts.second_stage, AN7581.prompts.second_stage);
+    }
+
+    #[test]
+    fn wait_for_uboot_prompt_sends_carriage_return_before_matching() {
+        let timeout = Duration::from_secs(3);
+        let mut transport = MockTransport::new([
+            MockStep::SetTimeout(timeout),
+            MockStep::Write(b"\r".to_vec()),
+            MockStep::Flush,
+            MockStep::Read(b"boot chatter\r\nVALYRIAN> \r\n".to_vec()),
+        ]);
+
+        let prompt =
+            wait_for_uboot_prompt(&mut transport, PromptPattern::new(r"VALYRIAN>"), timeout)
+                .unwrap();
+
+        assert_eq!(prompt, "VALYRIAN>");
+        transport.assert_finished();
     }
 }
