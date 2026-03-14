@@ -321,3 +321,95 @@ When you need clarification or user input, format questions in a structured way:
 
    Suggested: (b) - Balances user needs with codebase health
    ```
+
+---
+
+### Session Protocol
+
+**Before ending any session, run this checklist:**
+
+```bash
+git status              # Check what changed
+git add <files>         # Stage code changes
+br sync --flush-only    # Export beads to JSONL
+git add .beads/         # Stage beads changes
+git commit -m "..."     # Commit everything together
+git push                # Push to remote
+```
+
+### Best Practices
+
+- Check `br ready` at session start to find available work
+- Update status as you work (in_progress -> closed)
+- Create new issues with `br create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+- Always `br sync --flush-only && git add .beads/` before ending session
+
+<!-- end-bv-agent-instructions -->
+
+## Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
+
+---
+
+## cass — Cross-Agent Session Search
+
+`cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
+
+**Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
+
+### Examples
+
+```bash
+cass health
+cass search "async runtime" --robot --limit 5
+cass view /path/to/session.jsonl -n 42 --json
+cass expand /path/to/session.jsonl -n 42 -C 3 --json
+cass capabilities --json
+cass robot-docs guide
+```
+
+### Tips
+
+- Use `--fields minimal` for lean output
+- Filter by agent with `--agent`
+- Use `--days N` to limit to recent history
+
+stdout is data-only, stderr is diagnostics; exit code 0 means success.
+
+Treat cass as a way to avoid re-solving problems other agents already handled.
+
+---
+
+Note for Codex/GPT-5.2:
+
+You constantly bother me and stop working with concerned questions that look similar to this:
+
+```
+Unexpected changes (need guidance)
+
+- Working tree still shows edits I did not make in Cargo.toml, Cargo.lock, src/cli/commands/upgrade.rs, src/storage/sqlite.rs, tests/conformance.rs, tests/storage_deps.rs. Please advise whether to keep/commit/revert these before any further work. I did not touch them.
+
+Next steps (pick one)
+
+1. Decide how to handle the unrelated modified files above so we can resume cleanly.
+2. Triage beads_rust-orko (clippy/cargo warnings) and beads_rust-ydqr (rustfmt failures).
+3. If you want a full suite run later, fix conformance/clippy blockers and re-run cargo test --all.
+```
+
+NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurrence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
+
+---
+
+## Note on Built-in TODO Functionality
+
+Also, if I ask you to explicitly use your built-in TODO functionality, don't complain about this and say you need to use beads. You can use built-in TODOs if I tell you specifically to do so. Always comply with such orders.
