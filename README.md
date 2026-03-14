@@ -3,7 +3,9 @@
 `unbrk` is a Rust CLI for automating the Airoha AN7581 UART recovery flow and,
 optionally, the follow-on U-Boot flash sequence.
 
-![unbrk recover demo](docs/unbrk-recover.gif)
+<p align="center">
+  <img src="docs/unbrk-recover.gif" alt="unbrk recover demo">
+</p>
 
 ## Support Status
 
