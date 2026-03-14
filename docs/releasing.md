@@ -145,6 +145,29 @@ workspace explicit:
 - archives are `.tar.gz` on Unix and `.zip` on Windows
 - shell and PowerShell installers are enabled
 - SHA-256 checksums are generated alongside the archives
+- GitHub Artifact Attestations are generated in the build jobs for the
+  same files that are later uploaded to the GitHub Release
+
+The attestation step uses `actions/attest-build-provenance@v3` with the
+GitHub-documented permissions:
+
+- `contents: read`
+- `id-token: write`
+- `attestations: write`
+
+This keeps provenance attached to the job that actually built each set of
+release files, instead of trying to attest them later from the upload job.
+
+Attestations are available on public repositories for all current GitHub
+plans. For private or internal repositories, GitHub requires Enterprise
+Cloud.
+
+To verify a downloaded release artifact locally, use GitHub CLI:
+
+```bash
+gh attestation verify ./unbrk-cli-x86_64-unknown-linux-gnu.tar.gz \
+  -R ynezz/unbrk
+```
 
 Because the artifact workflow is triggered by `release-plz`-created
 releases, `RELEASE_PLZ_TOKEN` is the recommended token. A release created
