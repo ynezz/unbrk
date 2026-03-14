@@ -64,6 +64,8 @@ jobs:
       - plan
     if: ${{ github.event_name == 'release' }}
     runs-on: ${{ matrix.os }}
+    env:
+      BUILD_MANIFEST_NAME: target/distrib/${{ matrix.target }}-dist-manifest.json
     permissions:
       contents: read
       id-token: write
@@ -108,6 +110,8 @@ jobs:
           dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+          cp dist-manifest.json "${BUILD_MANIFEST_NAME}"
+
       - name: Attest local artifacts
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
@@ -117,7 +121,9 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: dist-local-${{ matrix.target }}
-          path: ${{ steps.files.outputs.paths }}
+          path: |
+            ${{ steps.files.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
 
   build-global:
     name: build-global
@@ -191,6 +197,28 @@ jobs:
           pattern: dist-*
           path: artifacts
           merge-multiple: true
+
+      - name: Remove build manifests from release payload
+        shell: bash
+        run: |
+          find artifacts -type f -name '*-dist-manifest.json' -delete
+
+      - name: Build release checksum manifest
+        shell: bash
+        run: |
+          checksum_file="artifacts/unbrk-${{ needs.plan.outputs.tag }}.sha256"
+          find artifacts -maxdepth 1 -type f \
+            ! -name '*.sha256' \
+            ! -name 'sha256.sum' \
+            ! -name "$(basename "${checksum_file}")" \
+            -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > "${checksum_file}"
+
+          if [[ ! -s "${checksum_file}" ]]; then
+            echo "release checksum manifest is empty"
+            exit 1
+          fi
 
       - name: Upload artifacts to GitHub Release
         shell: bash

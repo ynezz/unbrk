@@ -136,6 +136,11 @@ This workflow intentionally complements `release-plz` instead of letting
   `x86_64-apple-darwin`, and `aarch64-apple-darwin`, then uploads the
   artifacts to the existing GitHub Release
 
+For release runs, `dist.yml` also carries the per-target
+`dist-manifest.json` files from the local jobs into the global cargo-dist
+pass. That is required for cargo-dist to generate a populated `sha256.sum`
+instead of an empty checksum manifest.
+
 The `cargo-dist` configuration lives in `dist-workspace.toml`. We keep the
 workspace explicit:
 
@@ -145,6 +150,8 @@ workspace explicit:
 - archives are `.tar.gz` on Unix and `.zip` on Windows
 - shell and PowerShell installers are enabled
 - SHA-256 checksums are generated alongside the archives
+- a release-level `unbrk-vX.Y.Z.sha256` manifest is generated for the
+  shipped payload set before upload
 - GitHub Artifact Attestations are generated in the build jobs for the
   same files that are later uploaded to the GitHub Release
 
