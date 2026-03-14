@@ -1,7 +1,7 @@
 //! Recovery-state orchestration for reaching the RAM-resident U-Boot prompt.
 
 use crate::error::{ConsoleTail, UnbrkError};
-use crate::event::{Event, EventPayload, RecoveryStage, TransferStage};
+use crate::event::{Event, EventPayload, RecoveryStage, TransferStage, timestamp_now_unix_ms};
 use crate::prompt::{
     PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex, advance_to_prompt_with_regex,
 };
@@ -237,8 +237,7 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
     fn emit(&mut self, payload: EventPayload) {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
-        let event = Event::now(sequence, payload.clone())
-            .unwrap_or_else(|_| Event::new(sequence, 0, payload));
+        let event = Event::new(sequence, timestamp_now_unix_ms().unwrap_or(0), payload);
         self.events.push(event);
     }
 

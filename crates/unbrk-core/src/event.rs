@@ -411,7 +411,7 @@ impl fmt::Display for FailureClass {
     }
 }
 
-fn timestamp_now_unix_ms() -> Result<u64, SystemTimeError> {
+pub(crate) fn timestamp_now_unix_ms() -> Result<u64, SystemTimeError> {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
     Ok(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
 }

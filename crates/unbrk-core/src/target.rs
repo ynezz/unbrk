@@ -237,7 +237,7 @@ impl WriteStage {
 
     /// Returns the maximum image size that fits in this stage.
     #[must_use]
-    pub const fn max_bytes(&self, block_size: MmcBlockSize) -> u64 {
+    pub fn max_bytes(&self, block_size: MmcBlockSize) -> u64 {
         self.as_block_range().byte_len(block_size)
     }
 
@@ -360,7 +360,7 @@ impl BlockRange {
 
     /// Returns the maximum payload size in bytes for this range.
     #[must_use]
-    pub const fn byte_len(self, block_size: MmcBlockSize) -> u64 {
+    pub fn byte_len(self, block_size: MmcBlockSize) -> u64 {
         self.block_count.bytes(block_size)
     }
 }
@@ -402,8 +402,8 @@ impl BlockCount {
 
     /// Returns the capacity covered by this block count.
     #[must_use]
-    pub const fn bytes(self, block_size: MmcBlockSize) -> u64 {
-        (self.0 as u64) * (block_size.get() as u64)
+    pub fn bytes(self, block_size: MmcBlockSize) -> u64 {
+        u64::from(self.0) * u64::from(block_size.get())
     }
 }
 

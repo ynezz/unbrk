@@ -1,7 +1,9 @@
 //! Persistent flash-plan execution from a live U-Boot prompt.
 
 use crate::error::{ConsoleTail, UnbrkError};
-use crate::event::{Event, EventPayload, ImageKind, RecoveryStage, TransferStage};
+use crate::event::{
+    Event, EventPayload, ImageKind, RecoveryStage, TransferStage, timestamp_now_unix_ms,
+};
 use crate::prompt::{PromptMatch, advance_to_prompt_allowing_trailing_space_with_regex};
 use crate::target::{FlashPlan, TargetProfile, WriteStage};
 use crate::transport::Transport;
@@ -552,8 +554,7 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
     fn emit(&mut self, payload: EventPayload) {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
-        let event = Event::now(sequence, payload.clone())
-            .unwrap_or_else(|_| Event::new(sequence, 0, payload));
+        let event = Event::new(sequence, timestamp_now_unix_ms().unwrap_or(0), payload);
         self.events.push(event);
     }
 

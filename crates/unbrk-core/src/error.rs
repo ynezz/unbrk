@@ -42,9 +42,8 @@ pub struct ConsoleTail {
 impl ConsoleTail {
     /// Creates a console snapshot from the trailing bytes of a UART buffer.
     #[must_use]
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        let bytes = bytes.into();
-        Self::from_buffer(bytes.as_slice())
+    pub fn new(bytes: impl AsRef<[u8]>) -> Self {
+        Self::from_buffer(bytes.as_ref())
     }
 
     /// Creates a console snapshot from the trailing bytes of a borrowed UART buffer.
@@ -228,7 +227,7 @@ mod tests {
             stage: RecoveryStage::PreloaderPrompt,
             operation: "initial prompt",
             timeout: Duration::from_secs(3),
-            recent_console: ConsoleTail::new(b"Press ".to_vec()),
+            recent_console: ConsoleTail::new(b"Press "),
         };
 
         assert_eq!(error.failure_class(), FailureClass::Timeout);
@@ -242,7 +241,7 @@ mod tests {
             stage: RecoveryStage::FipPrompt,
             expected_pattern: String::from("Press x to load BL31 \\+ U-Boot FIP"),
             observed: String::from("Booting"),
-            recent_console: ConsoleTail::new(b"Booting\r\n".to_vec()),
+            recent_console: ConsoleTail::new(b"Booting\r\n"),
         };
 
         assert_eq!(error.failure_class(), FailureClass::Protocol);
@@ -268,7 +267,7 @@ mod tests {
             image: ImageKind::Preloader,
             expected_bytes: 129_024,
             observed_bytes: 128_000,
-            recent_console: ConsoleTail::new(b"filesize=1f400".to_vec()),
+            recent_console: ConsoleTail::new(b"filesize=1f400"),
         };
 
         assert_eq!(error.failure_class(), FailureClass::VerificationMismatch);
