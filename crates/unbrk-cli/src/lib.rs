@@ -202,7 +202,6 @@ fn validate_recover(
     Ok(CommandPlan::Recover(Box::new(RecoverPlan {
         args,
         progress_mode,
-        no_console,
         console_handoff_allowed,
         terminal_status,
     })))
@@ -247,11 +246,12 @@ fn run_recover(
     let port = recover_port(plan)?;
     let target = target_profile(&plan.args);
     let mut events = Vec::new();
-    let mut renderer = matches!(plan.progress_mode, ResolvedProgressMode::Fancy)
-        .then(|| FancyProgressRenderer::new(plan));
+    let mut reporter = ProgressReporter::new(plan, stdout);
+    reporter.write_startup_banner(plan, port.as_str(), &target);
+    reporter.output_result()?;
     record_local_event(
         &mut events,
-        &mut renderer,
+        &mut reporter,
         EventPayload::SessionStarted {
             schema_version: EVENT_SCHEMA_VERSION,
             tool_version: String::from(env!("CARGO_PKG_VERSION")),
@@ -259,24 +259,25 @@ fn run_recover(
             serial_port: Some(port.clone()),
         },
     );
+    reporter.output_result()?;
 
     let mut transport = open_transport(port.as_str(), &plan.args)?;
     record_local_event(
         &mut events,
-        &mut renderer,
+        &mut reporter,
         EventPayload::PortOpened {
             port: port.clone(),
             baud: plan.args.baud,
         },
     );
+    reporter.output_result()?;
 
-    let mut execution = execute_recover(plan, target, &mut transport, &mut events, &mut renderer);
+    let mut execution = execute_recover(plan, target, &mut transport, &mut events, &mut reporter);
+    reporter.output_result()?;
     let mut console_handoff_completed = false;
     if matches!(execution, Ok(RecoverOutcome::Recovered)) && plan.console_handoff_allowed {
-        if let Some(renderer) = renderer.as_ref() {
-            renderer.finish();
-        }
-        match handoff_console(&mut transport, stdout) {
+        reporter.finish();
+        match handoff_console(&mut transport, reporter.writer()) {
             Ok(()) => {
                 console_handoff_completed = true;
             }
@@ -285,17 +286,16 @@ fn run_recover(
     }
 
     if let Err(error) = &execution {
-        if let Some(renderer) = renderer.as_ref() {
-            renderer.finish();
-        }
+        reporter.finish();
         record_local_event(
             &mut events,
-            &mut renderer,
+            &mut reporter,
             EventPayload::Failure {
                 class: error.failure_class(),
                 message: error.to_string(),
             },
         );
+        reporter.output_result()?;
         if !plan.args.json {
             if matches!(error, RunError::Timeout(_))
                 && let Some(hint) = timeout_hint(&events)
@@ -313,10 +313,10 @@ fn run_recover(
     }
 
     if plan.args.json {
-        write_events_and_flush(stdout, &events)?;
+        write_events_and_flush(reporter.writer(), &events)?;
     } else if let Ok(outcome) = &execution {
         write_recover_summary(
-            stdout,
+            reporter.writer(),
             plan,
             port.as_str(),
             outcome,
@@ -830,7 +830,7 @@ fn execute_recover(
     target: TargetProfile,
     transport: &mut CliTransport,
     events: &mut Vec<Event>,
-    renderer: &mut Option<FancyProgressRenderer>,
+    reporter: &mut ProgressReporter<'_>,
 ) -> Result<RecoverOutcome, RunError> {
     let recovery_config = RecoveryConfig::new(
         duration_override(plan.args.prompt_timeout, DEFAULT_PROMPT_TIMEOUT),
@@ -847,7 +847,7 @@ fn execute_recover(
             let flash_plan = build_flash_plan(&plan.args, &target)?;
             let flash_report =
                 flash_from_uboot(transport, target, &flash_plan, flash_config, |event| {
-                    record_core_event(events, renderer, event.clone());
+                    record_core_event(events, reporter, event.clone());
                 })
                 .map_err(RunError::from)?;
             return Ok(RecoverOutcome::FlashedFromExistingPrompt {
@@ -861,10 +861,10 @@ fn execute_recover(
             duration_override(plan.args.command_timeout, DEFAULT_COMMAND_TIMEOUT),
         )
         .map_err(RunError::from)?;
-        record_local_event(events, renderer, EventPayload::UBootPromptSeen { prompt });
+        record_local_event(events, reporter, EventPayload::UBootPromptSeen { prompt });
         record_local_event(
             events,
-            renderer,
+            reporter,
             EventPayload::HandoffReady {
                 interactive_console: plan.console_handoff_allowed,
             },
@@ -896,7 +896,7 @@ fn execute_recover(
             fip: &fip,
         },
         recovery_config,
-        |event| record_core_event(events, renderer, event.clone()),
+        |event| record_core_event(events, reporter, event.clone()),
     )
     .map_err(RunError::from)?;
 
@@ -904,7 +904,7 @@ fn execute_recover(
         let flash_plan = build_flash_plan(&plan.args, &target)?;
         let flash_report =
             flash_from_uboot(transport, target, &flash_plan, flash_config, |event| {
-                record_core_event(events, renderer, event.clone());
+                record_core_event(events, reporter, event.clone());
             })
             .map_err(RunError::from)?;
         Ok(RecoverOutcome::FlashedAfterRecovery {
@@ -913,7 +913,7 @@ fn execute_recover(
     } else {
         record_local_event(
             events,
-            renderer,
+            reporter,
             EventPayload::HandoffReady {
                 interactive_console: plan.console_handoff_allowed,
             },
@@ -1234,6 +1234,10 @@ impl FancyProgressRenderer {
         self.bar.finish_and_clear();
     }
 
+    fn println(&self, line: impl Into<String>) {
+        self.bar.println(line.into());
+    }
+
     fn complete_transfer(&self, stage: TransferStage, recovered_from_eot_quirk: bool) {
         if recovered_from_eot_quirk {
             self.bar.println(format!(
@@ -1308,7 +1312,7 @@ impl FancyProgressRenderer {
 }
 
 fn fancy_spinner_style() -> ProgressStyle {
-    ProgressStyle::with_template("{spinner:.green} {msg}")
+    ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
         .unwrap_or_else(|_| ProgressStyle::default_spinner())
 }
 
@@ -1349,27 +1353,326 @@ fn transfer_message(
     )
 }
 
+struct ProgressReporter<'a> {
+    writer: &'a mut dyn Write,
+    mode: ProgressReporterMode,
+    output_error: Option<RunError>,
+}
+
+enum ProgressReporterMode {
+    Off,
+    Fancy(FancyProgressRenderer),
+    Plain(PlainProgressRenderer),
+}
+
+impl<'a> ProgressReporter<'a> {
+    fn new(plan: &RecoverPlan, writer: &'a mut dyn Write) -> Self {
+        let mode = match plan.progress_mode {
+            ResolvedProgressMode::Off => ProgressReporterMode::Off,
+            ResolvedProgressMode::Fancy => {
+                ProgressReporterMode::Fancy(FancyProgressRenderer::new(plan))
+            }
+            ResolvedProgressMode::Plain => {
+                ProgressReporterMode::Plain(PlainProgressRenderer::default())
+            }
+        };
+
+        Self {
+            writer,
+            mode,
+            output_error: None,
+        }
+    }
+
+    fn write_startup_banner(&mut self, plan: &RecoverPlan, port: &str, target: &TargetProfile) {
+        let lines = recover_startup_banner(plan, port, target);
+        match &self.mode {
+            ProgressReporterMode::Off => {}
+            ProgressReporterMode::Fancy(renderer) => {
+                for line in lines {
+                    renderer.println(line);
+                }
+            }
+            ProgressReporterMode::Plain(_) => {
+                for line in lines {
+                    self.write_line(line);
+                }
+            }
+        }
+    }
+
+    fn observe(&mut self, event: &Event) {
+        let line = match &mut self.mode {
+            ProgressReporterMode::Off => None,
+            ProgressReporterMode::Fancy(renderer) => {
+                renderer.observe(event);
+                None
+            }
+            ProgressReporterMode::Plain(renderer) => renderer.render_event(event),
+        };
+
+        if let Some(line) = line {
+            self.write_line(line);
+        }
+    }
+
+    fn finish(&self) {
+        if let ProgressReporterMode::Fancy(renderer) = &self.mode {
+            renderer.finish();
+        }
+    }
+
+    fn writer(&mut self) -> &mut dyn Write {
+        self.writer
+    }
+
+    fn output_result(&mut self) -> Result<(), RunError> {
+        self.output_error.take().map_or(Ok(()), Err)
+    }
+
+    fn write_line(&mut self, line: impl AsRef<str>) {
+        if self.output_error.is_some() {
+            return;
+        }
+
+        if let Err(source) = writeln!(self.writer, "{}", line.as_ref()) {
+            self.output_error = Some(stdout_io_error("writing progress output", &source));
+            return;
+        }
+
+        if let Err(source) = self.writer.flush() {
+            self.output_error = Some(output_io_error("flushing progress output", &source));
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PlainProgressRenderer {
+    transfer_progress: Option<TransferProgressState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransferProgressState {
+    stage: TransferStage,
+    bucket: u64,
+}
+
+impl PlainProgressRenderer {
+    fn render_event(&mut self, event: &Event) -> Option<String> {
+        match &event.payload {
+            EventPayload::SessionStarted { .. }
+            | EventPayload::PortOpened { .. }
+            | EventPayload::UBootCommandCompleted { .. } => None,
+            EventPayload::PromptSeen {
+                stage: RecoveryStage::PreloaderPrompt,
+                ..
+            } => Some(String::from("Detected the preloader prompt; sending x.")),
+            EventPayload::PromptSeen {
+                stage: RecoveryStage::FipPrompt,
+                ..
+            } => Some(String::from("Detected the FIP prompt; sending x.")),
+            EventPayload::InputSent {
+                stage: RecoveryStage::PreloaderPrompt,
+                ..
+            } => Some(String::from(
+                "Requested the preloader upload; waiting for the XMODEM receiver.",
+            )),
+            EventPayload::InputSent {
+                stage: RecoveryStage::FipPrompt,
+                ..
+            } => Some(String::from(
+                "Requested the FIP upload; waiting for the XMODEM receiver.",
+            )),
+            EventPayload::PromptSeen { .. } | EventPayload::InputSent { .. } => {
+                Some(event.payload.to_string())
+            }
+            EventPayload::CrcReady { stage, .. } => Some(format!(
+                "{} is ready to receive over XMODEM.",
+                transfer_stage_label(*stage)
+            )),
+            EventPayload::XmodemStarted {
+                stage, size_bytes, ..
+            } => {
+                self.transfer_progress = Some(TransferProgressState {
+                    stage: *stage,
+                    bucket: 0,
+                });
+                Some(format!(
+                    "Uploading {} ({} total).",
+                    stage_label(*stage),
+                    HumanBytes(*size_bytes)
+                ))
+            }
+            EventPayload::XmodemProgress {
+                stage,
+                bytes_sent,
+                total_bytes,
+            } => self.render_transfer_progress(*stage, *bytes_sent, *total_bytes),
+            EventPayload::XmodemCompleted {
+                stage,
+                recovered_from_eot_quirk,
+                ..
+            } => {
+                self.transfer_progress = None;
+                Some(if *recovered_from_eot_quirk {
+                    format!(
+                        "Finished uploading {} after recovering from an EOT quirk.",
+                        stage_label(*stage)
+                    )
+                } else {
+                    format!("Finished uploading {}.", stage_label(*stage))
+                })
+            }
+            EventPayload::UBootPromptSeen { .. } => {
+                Some(String::from("Reached the RAM-resident U-Boot prompt."))
+            }
+            EventPayload::UBootCommandStarted { command } => Some(plain_command_message(command)),
+            EventPayload::ImageVerified { image, .. } => {
+                Some(format!("Verified {image}; writing it to persistent flash."))
+            }
+            EventPayload::ResetSeen { evidence } => {
+                Some(format!("Observed target reset: {evidence}."))
+            }
+            EventPayload::HandoffReady {
+                interactive_console,
+            } => Some(if *interactive_console {
+                String::from("Recovery complete; interactive console handoff is ready.")
+            } else {
+                String::from("Recovery complete; stopping at the machine-controlled handoff point.")
+            }),
+            EventPayload::Failure { class, message } => {
+                Some(format!("Recovery failed ({class}): {message}"))
+            }
+        }
+    }
+
+    fn render_transfer_progress(
+        &mut self,
+        stage: TransferStage,
+        bytes_sent: u64,
+        total_bytes: u64,
+    ) -> Option<String> {
+        if total_bytes == 0 {
+            return None;
+        }
+
+        let percent = bytes_sent.saturating_mul(100) / total_bytes;
+        let bucket = percent / 10;
+        let progress_state = self
+            .transfer_progress
+            .unwrap_or(TransferProgressState { stage, bucket: 0 });
+        if progress_state.stage == stage
+            && bucket <= progress_state.bucket
+            && bytes_sent < total_bytes
+        {
+            return None;
+        }
+
+        self.transfer_progress = Some(TransferProgressState { stage, bucket });
+        Some(format!(
+            "Uploading {}: {percent}% ({}/{})",
+            stage_label(stage),
+            HumanBytes(bytes_sent),
+            HumanBytes(total_bytes)
+        ))
+    }
+}
+
+fn recover_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Starting recovery on {port} at {} baud for target {}.",
+        plan.args.baud, target.name
+    )];
+
+    if plan.args.resume_from_uboot {
+        lines.push(String::from("Mode: resume from an existing U-Boot prompt."));
+    } else {
+        lines.push(format!(
+            "Images: preloader={}, FIP={}.",
+            display_optional_path(plan.args.preloader.as_deref()),
+            display_optional_path(plan.args.fip.as_deref()),
+        ));
+    }
+
+    lines.push(format!(
+        "Timeouts: prompt {}, packet {}, command {}, reset {}.",
+        HumanDuration(duration_override(
+            plan.args.prompt_timeout,
+            DEFAULT_PROMPT_TIMEOUT
+        )),
+        HumanDuration(duration_override(
+            plan.args.packet_timeout,
+            XMODEM_DEFAULT_PACKET_TIMEOUT
+        )),
+        HumanDuration(duration_override(
+            plan.args.command_timeout,
+            DEFAULT_COMMAND_TIMEOUT
+        )),
+        HumanDuration(duration_override(
+            plan.args.reset_timeout,
+            DEFAULT_RESET_TIMEOUT
+        )),
+    ));
+    lines.push(format!(
+        "Console handoff: {}.",
+        if plan.console_handoff_allowed {
+            "interactive after recovery"
+        } else {
+            "disabled; stop at U-Boot"
+        }
+    ));
+
+    lines
+}
+
+fn display_optional_path(path: Option<&Path>) -> String {
+    path.map_or_else(|| String::from("n/a"), |path| path.display().to_string())
+}
+
+const fn transfer_stage_label(stage: TransferStage) -> &'static str {
+    match stage {
+        TransferStage::Preloader => "Preloader",
+        TransferStage::Fip => "FIP",
+        TransferStage::LoadxPreloader => "Preloader flash staging image",
+        TransferStage::LoadxFip => "FIP flash staging image",
+    }
+}
+
+fn plain_command_message(command: &str) -> String {
+    if command == "printenv loadaddr" {
+        String::from("Reading the U-Boot load address.")
+    } else if command.starts_with("mmc erase ") {
+        String::from("Erasing the persistent flash region.")
+    } else if command.starts_with("loadx ") {
+        String::from("Waiting for XMODEM after the loadx command.")
+    } else if command == "printenv filesize" {
+        String::from("Verifying the transferred image size.")
+    } else if command.starts_with("mmc write ") {
+        String::from("Writing the image to persistent flash.")
+    } else if command == "reset" {
+        String::from("Waiting for the post-flash reset.")
+    } else {
+        format!("Running `{command}`.")
+    }
+}
+
 fn record_local_event(
     events: &mut Vec<Event>,
-    renderer: &mut Option<FancyProgressRenderer>,
+    reporter: &mut ProgressReporter<'_>,
     payload: EventPayload,
 ) {
     push_event(events, payload);
-    observe_last_event(events, renderer);
+    observe_last_event(events, reporter);
 }
 
-fn record_core_event(
-    events: &mut Vec<Event>,
-    renderer: &mut Option<FancyProgressRenderer>,
-    event: Event,
-) {
+fn record_core_event(events: &mut Vec<Event>, reporter: &mut ProgressReporter<'_>, event: Event) {
     push_existing_event(events, event);
-    observe_last_event(events, renderer);
+    observe_last_event(events, reporter);
 }
 
-fn observe_last_event(events: &[Event], renderer: &mut Option<FancyProgressRenderer>) {
-    if let (Some(event), Some(renderer)) = (events.last(), renderer.as_mut()) {
-        renderer.observe(event);
+fn observe_last_event(events: &[Event], reporter: &mut ProgressReporter<'_>) {
+    if let Some(event) = events.last() {
+        reporter.observe(event);
     }
 }
 
@@ -1526,10 +1829,8 @@ fn write_recover_summary(
 ) -> Result<(), RunError> {
     writeln!(
         stdout,
-        "recovering on {port} | progress mode: {} | no-console: {} | stdout tty: {}",
-        plan.progress_mode.as_str(),
-        plan.no_console,
-        plan.terminal_status.stdout_is_tty,
+        "Recovery finished on {port} at {} baud.",
+        plan.args.baud,
     )
     .map_err(|source| stdout_io_error("writing the recovery summary header", &source))?;
 
@@ -1538,28 +1839,28 @@ fn write_recover_summary(
             if console_handoff_completed {
                 writeln!(
                     stdout,
-                    "interactive console handoff ended at the RAM-resident U-Boot prompt."
+                    "Interactive console handoff ended at the RAM-resident U-Boot prompt."
                 )
                 .map_err(|source| {
                     stdout_io_error("writing the recovery summary outcome", &source)
                 })?;
             } else {
-                writeln!(stdout, "stopped at the RAM-resident U-Boot prompt.").map_err(
-                    |source| stdout_io_error("writing the recovery summary outcome", &source),
-                )?;
+                writeln!(stdout, "Reached the RAM-resident U-Boot prompt.").map_err(|source| {
+                    stdout_io_error("writing the recovery summary outcome", &source)
+                })?;
             }
         }
         RecoverOutcome::FlashedAfterRecovery { reset_evidence } => {
             writeln!(
                 stdout,
-                "completed recovery and persistent flash; observed reset evidence: {reset_evidence}"
+                "Completed recovery and persistent flash. Observed reset evidence: {reset_evidence}"
             )
             .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
         }
         RecoverOutcome::FlashedFromExistingPrompt { reset_evidence } => {
             writeln!(
                 stdout,
-                "resumed from an existing U-Boot prompt and completed the persistent flash; observed reset evidence: {reset_evidence}"
+                "Resumed from an existing U-Boot prompt and completed the persistent flash. Observed reset evidence: {reset_evidence}"
             )
             .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
         }
@@ -1708,16 +2009,6 @@ enum ResolvedProgressMode {
     Off,
 }
 
-impl ResolvedProgressMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Plain => "plain",
-            Self::Fancy => "fancy",
-            Self::Off => "off",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TerminalStatus {
     stdin_is_tty: bool,
@@ -1746,7 +2037,6 @@ enum CommandPlan {
 struct RecoverPlan {
     args: RecoverArgs,
     progress_mode: ResolvedProgressMode,
-    no_console: bool,
     console_handoff_allowed: bool,
     terminal_status: TerminalStatus,
 }
@@ -1903,9 +2193,9 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliExitCode, CommandPlan, ConsoleAction, FancyProgressRenderer, ProgressMode,
-        RecoverOutcome, RecoverPlan, ResolvedProgressMode, RunError, TerminalStatus, append_events,
-        build_flash_plan, console_action_for_key_event, flush_event_writer,
+        CliExitCode, CommandPlan, ConsoleAction, FancyProgressRenderer, PlainProgressRenderer,
+        ProgressMode, RecoverOutcome, RecoverPlan, ResolvedProgressMode, RunError, TerminalStatus,
+        append_events, build_flash_plan, console_action_for_key_event, flush_event_writer,
         is_plausible_recovery_port, map_json_event_error, normalize_port_name, parse_command,
         render_port_line, select_recover_port, target_profile, timeout_hint, transfer_message,
         try_run, wait_for_uboot_prompt, write_event_trace, write_events, write_events_and_flush,
@@ -1976,7 +2266,6 @@ mod tests {
 
         assert_eq!(plan.progress_mode, ResolvedProgressMode::Fancy);
         assert!(plan.console_handoff_allowed);
-        assert!(!plan.no_console);
     }
 
     #[test]
@@ -2110,7 +2399,6 @@ mod tests {
         );
 
         assert_eq!(plan.progress_mode, ResolvedProgressMode::Off);
-        assert!(plan.no_console);
         assert!(!plan.console_handoff_allowed);
     }
 
@@ -2499,6 +2787,63 @@ mod tests {
     }
 
     #[test]
+    fn plain_renderer_emits_phase_and_progress_lines() {
+        let mut renderer = PlainProgressRenderer::default();
+
+        assert_eq!(
+            renderer.render_event(&fixture_event(
+                1,
+                0,
+                EventPayload::PromptSeen {
+                    stage: RecoveryStage::PreloaderPrompt,
+                    prompt: String::from("Press x"),
+                },
+            )),
+            Some(String::from("Detected the preloader prompt; sending x."))
+        );
+
+        assert_eq!(
+            renderer.render_event(&fixture_event(
+                2,
+                0,
+                EventPayload::XmodemStarted {
+                    stage: TransferStage::Preloader,
+                    file_name: String::from(PRELOADER),
+                    size_bytes: 1024,
+                },
+            )),
+            Some(String::from("Uploading preloader (1.00 KiB total)."))
+        );
+
+        assert_eq!(
+            renderer.render_event(&fixture_event(
+                3,
+                0,
+                EventPayload::XmodemProgress {
+                    stage: TransferStage::Preloader,
+                    bytes_sent: 512,
+                    total_bytes: 1024,
+                },
+            )),
+            Some(String::from("Uploading preloader: 50% (512 B/1.00 KiB)"))
+        );
+
+        assert_eq!(
+            renderer.render_event(&fixture_event(
+                4,
+                0,
+                EventPayload::XmodemCompleted {
+                    stage: TransferStage::Preloader,
+                    bytes_sent: 1024,
+                    expected_bytes: 1024,
+                    recovered_from_eot_quirk: false,
+                },
+            )),
+            Some(String::from("Finished uploading preloader."))
+        );
+    }
+
+    #[test]
     fn timeout_hint_points_to_the_stalled_phase() {
         let events = vec![fixture_event(
             1,
@@ -2565,8 +2910,9 @@ mod tests {
         write_recover_summary(&mut stdout, &plan, PORT, &RecoverOutcome::Recovered, true).unwrap();
 
         let rendered = String::from_utf8(stdout).unwrap();
-        assert!(rendered.contains("interactive console handoff ended"));
-        assert!(!rendered.contains("not implemented"));
+        assert!(rendered.contains("Recovery finished on"));
+        assert!(rendered.contains("Interactive console handoff ended"));
+        assert!(!rendered.contains("progress mode"));
     }
 
     #[test]
