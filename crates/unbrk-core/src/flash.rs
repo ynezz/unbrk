@@ -80,7 +80,7 @@ pub fn flash_from_uboot(
     plan: &FlashPlan,
     config: FlashConfig,
 ) -> Result<FlashReport, UnbrkError> {
-    plan.validate_image_sizes()?;
+    let prepared_stages = prepare_stage_payloads(plan)?;
 
     let mut runner = FlashRunner::new(transport, target, config);
 
@@ -108,9 +108,9 @@ pub fn flash_from_uboot(
     let mut preloader_recovered_from_eot_quirk = false;
     let mut fip_recovered_from_eot_quirk = false;
 
-    for stage in &plan.write_stages {
-        let stage_result = runner.transfer_stage(stage)?;
-        match stage.image {
+    for prepared_stage in &prepared_stages {
+        let stage_result = runner.transfer_stage(&prepared_stage.stage, &prepared_stage.payload)?;
+        match prepared_stage.stage.image {
             ImageKind::Preloader => {
                 preloader_recovered_from_eot_quirk = stage_result.recovered_from_eot_quirk;
             }
@@ -141,6 +141,12 @@ pub fn flash_from_uboot(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StageTransferOutcome {
     recovered_from_eot_quirk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedStage {
+    stage: WriteStage,
+    payload: Vec<u8>,
 }
 
 struct FlashRunner<'a, T> {
@@ -215,8 +221,11 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         });
     }
 
-    fn transfer_stage(&mut self, stage: &WriteStage) -> Result<StageTransferOutcome, UnbrkError> {
-        let payload = read_image(stage.image_path.as_path(), stage.image)?;
+    fn transfer_stage(
+        &mut self,
+        stage: &WriteStage,
+        payload: &[u8],
+    ) -> Result<StageTransferOutcome, UnbrkError> {
         let transfer_stage = match stage.image {
             ImageKind::Preloader => TransferStage::LoadxPreloader,
             ImageKind::Fip => TransferStage::LoadxFip,
@@ -225,15 +234,15 @@ impl<'a, T: Transport> FlashRunner<'a, T> {
         let command_start = self.console.len();
         self.start_loadx(loadx_command.as_str())?;
         let recovered_from_eot_quirk =
-            self.run_loadx_transfer(transfer_stage, stage.image_path.as_path(), &payload)?;
+            self.run_loadx_transfer(transfer_stage, stage.image_path.as_path(), payload)?;
 
         let output = UBootCommandOutput::new(self.console[command_start..].to_vec());
-        Self::verify_total_size(stage.image, &payload, &output)?;
+        Self::verify_total_size(stage.image, payload, &output)?;
         self.emit_command_completed(loadx_command.as_str(), "loadx completed");
 
         let filesize_output = self.run_uboot_command("printenv filesize")?;
         let observed_size = parse_filesize(&filesize_output)?;
-        self.verify_filesize(stage.image, &payload, observed_size, &filesize_output)?;
+        self.verify_filesize(stage.image, payload, observed_size, &filesize_output)?;
         self.emit_command_completed("printenv filesize", "filesize verified");
 
         self.write_stage_to_mmc(stage)?;
@@ -598,6 +607,24 @@ fn read_image(path: &Path, image: ImageKind) -> Result<Vec<u8>, UnbrkError> {
     })
 }
 
+fn prepare_stage_payloads(plan: &FlashPlan) -> Result<Vec<PreparedStage>, UnbrkError> {
+    let mut prepared_stages = Vec::with_capacity(plan.write_stages.len());
+
+    for stage in &plan.write_stages {
+        let payload = read_image(stage.image_path.as_path(), stage.image)?;
+        stage.validate_image_size(
+            plan.block_size,
+            u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        )?;
+        prepared_stages.push(PreparedStage {
+            stage: stage.clone(),
+            payload,
+        });
+    }
+
+    Ok(prepared_stages)
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -609,10 +636,11 @@ mod tests {
     use super::{FlashConfig, flash_from_uboot};
     use crate::event::{EventPayload, ImageKind, TransferStage};
     use crate::target::AN7581;
-    use crate::transport::{MockStep, MockTransport};
+    use crate::transport::{MockStep, MockTransport, Transport};
     use crate::uboot::LoadAddr;
     use crate::xmodem::{XMODEM_ACK, XMODEM_NAK, XmodemConfig, build_crc_packet};
     use std::fs::{self, File};
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -720,6 +748,55 @@ mod tests {
             }
         )));
         transport.assert_finished();
+    }
+
+    #[test]
+    fn preloads_images_before_erasing_flash() {
+        let preloader = temp_file_with_bytes(&[0x11, 0x22, 0x33, 0x44]);
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
+        let transport = scripted_flash_transport(
+            build_crc_packet(1, &[0x11, 0x22, 0x33, 0x44]),
+            build_crc_packet(1, &[0xaa, 0xbb, 0xcc, 0xdd]),
+            vec![XMODEM_ACK],
+            fixture_reset_evidence(),
+        );
+        let mut transport = EraseDeletesFileTransport::new(
+            transport,
+            preloader.path.clone(),
+            b"mmc erase 0x0 0x800\n".to_vec(),
+        );
+
+        let report = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap();
+
+        assert_eq!(report.reset_evidence, "EcoNet System Reset");
+        assert!(!preloader.path.exists());
+        transport.assert_finished();
+    }
+
+    #[test]
+    fn fails_before_erasing_when_image_cannot_be_read() {
+        let preloader = unique_temp_path();
+        let fip = temp_file_with_bytes(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let plan = AN7581.flash_plan(preloader, fip.path.clone());
+        let mut transport = MockTransport::new([]);
+
+        let error = flash_from_uboot(
+            &mut transport,
+            AN7581,
+            &plan,
+            FlashConfig::new(COMMAND_TIMEOUT, RESET_TIMEOUT, XmodemConfig::default()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, crate::error::UnbrkError::BadInput { .. }));
+        assert!(transport.writes().is_empty());
     }
 
     fn scripted_flash_transport(
@@ -839,6 +916,50 @@ mod tests {
     impl Drop for TempFile {
         fn drop(&mut self) {
             let _ignored = fs::remove_file(&self.path);
+        }
+    }
+
+    struct EraseDeletesFileTransport {
+        inner: MockTransport,
+        path_to_delete: PathBuf,
+        erase_command: Vec<u8>,
+        deleted: bool,
+    }
+
+    impl EraseDeletesFileTransport {
+        fn new(inner: MockTransport, path_to_delete: PathBuf, erase_command: Vec<u8>) -> Self {
+            Self {
+                inner,
+                path_to_delete,
+                erase_command,
+                deleted: false,
+            }
+        }
+
+        fn assert_finished(&self) {
+            self.inner.assert_finished();
+        }
+    }
+
+    impl Transport for EraseDeletesFileTransport {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buffer)
+        }
+
+        fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+            if !self.deleted && bytes == self.erase_command {
+                fs::remove_file(&self.path_to_delete)?;
+                self.deleted = true;
+            }
+            self.inner.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+
+        fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+            self.inner.set_timeout(timeout)
         }
     }
 }
