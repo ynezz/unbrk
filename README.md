@@ -3,6 +3,8 @@
 `unbrk` is a Rust CLI for automating the Airoha AN7581 UART recovery flow and,
 optionally, the follow-on U-Boot flash sequence.
 
+![unbrk recover demo](docs/unbrk-recover.gif)
+
 ## Support Status
 
 - Linux is hardware-validated on Nokia Valyrian as of 2026-03-14.
