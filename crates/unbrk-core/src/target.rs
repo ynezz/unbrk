@@ -2,7 +2,7 @@
 
 use crate::error::UnbrkError;
 use crate::event::{ImageKind, RecoveryStage, TransferStage};
-use regex::{Error as RegexError, Regex};
+use regex::{Error as RegexError, bytes::Regex};
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -153,7 +153,7 @@ impl PromptPattern {
     ///
     /// # Errors
     ///
-    /// Returns the `regex` crate's compilation error.
+    /// Returns the `regex` crate's bytes-regex compilation error.
     pub fn compile(self) -> Result<Regex, RegexError> {
         Regex::new(self.source)
     }
@@ -328,8 +328,17 @@ pub struct BlockRange {
 
 impl BlockRange {
     /// Creates a block range from a start offset and block count.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `start_block + block_count` would overflow `u32`.
     #[must_use]
     pub const fn new(start_block: BlockOffset, block_count: BlockCount) -> Self {
+        assert!(
+            start_block.get().checked_add(block_count.get()).is_some(),
+            "block range end must fit in u32",
+        );
+
         Self {
             start_block,
             block_count,
@@ -337,9 +346,16 @@ impl BlockRange {
     }
 
     /// Returns the exclusive end block.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored range would overflow `u32`.
     #[must_use]
     pub const fn end_block(self) -> BlockOffset {
-        BlockOffset::new(self.start_block.get() + self.block_count.get())
+        match self.start_block.get().checked_add(self.block_count.get()) {
+            Some(end_block) => BlockOffset::new(end_block),
+            None => panic!("block range end must fit in u32"),
+        }
     }
 
     /// Returns the maximum payload size in bytes for this range.
@@ -417,7 +433,8 @@ fn file_size_bytes(path: &Path) -> std::io::Result<u64> {
 mod tests {
     use super::{
         AN7581, AN7581_FLASH_TRANSFER_ORDER, AN7581_RECOVERY_STAGE_ORDER,
-        AN7581_RECOVERY_TRANSFER_ORDER, BlockCount, BlockOffset, FlashPlan, MmcBlockSize,
+        AN7581_RECOVERY_TRANSFER_ORDER, BlockCount, BlockOffset, BlockRange, FlashPlan,
+        MmcBlockSize,
     };
     use crate::error::UnbrkError;
     use crate::event::{ImageKind, RecoveryStage, TransferStage};
@@ -486,7 +503,7 @@ mod tests {
         let initial_prompt = AN7581.prompts.initial_recovery.compile().unwrap();
         let second_stage = "Press x to load BL31 + U-Boot FIP";
 
-        assert!(initial_prompt.is_match(second_stage));
+        assert!(initial_prompt.is_match(second_stage.as_bytes()));
     }
 
     #[test]
@@ -532,6 +549,15 @@ mod tests {
         let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
 
         assert!(plan.validate_image_sizes().is_ok());
+    }
+
+    #[test]
+    fn block_range_new_rejects_overflowing_end_blocks() {
+        let result = std::panic::catch_unwind(|| {
+            BlockRange::new(BlockOffset::new(u32::MAX), BlockCount::new(1))
+        });
+
+        assert!(result.is_err());
     }
 
     #[test]
