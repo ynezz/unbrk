@@ -614,15 +614,15 @@ mod tests {
 
     #[test]
     fn mock_transport_splits_large_read_chunks_across_multiple_reads() {
-        let mut transport = MockTransport::from_rx_chunks([b"fragmented".to_vec()]);
+        let mut transport = MockTransport::from_rx_chunks([b"splitbytes".to_vec()]);
         let mut buffer = [0_u8; 4];
 
         assert_eq!(transport.read(&mut buffer).unwrap(), 4);
-        assert_eq!(&buffer, b"frag");
+        assert_eq!(&buffer, b"spli");
         assert_eq!(transport.read(&mut buffer).unwrap(), 4);
-        assert_eq!(&buffer, b"ment");
+        assert_eq!(&buffer, b"tbyt");
         assert_eq!(transport.read(&mut buffer).unwrap(), 2);
-        assert_eq!(&buffer[..2], b"ed");
+        assert_eq!(&buffer[..2], b"es");
         transport.assert_finished();
     }
 
