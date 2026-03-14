@@ -209,7 +209,7 @@ impl fmt::Display for EventPayload {
                 timeout_secs,
             } => write!(
                 formatter,
-                "waiting for {stage} prompt ({elapsed_secs}s/{timeout_secs}s)"
+                "waiting for {stage} ({elapsed_secs}s/{timeout_secs}s)"
             ),
             Self::PromptSeen { stage, prompt } => {
                 write!(formatter, "{stage} prompt seen: {prompt}")
