@@ -114,7 +114,7 @@ where
         Commands::Ports => Ok(CommandPlan::Ports),
         Commands::Completions { shell } => Ok(CommandPlan::Completions { shell }),
         Commands::Man => Ok(CommandPlan::Man),
-        Commands::Doctor => Ok(CommandPlan::Doctor),
+        Commands::Doctor(args) => Ok(CommandPlan::Doctor(args)),
     }
 }
 
@@ -225,14 +225,7 @@ fn dispatch(
                 .map_err(|source| stdout_io_error("rendering the manual page", &source))?;
             Ok(())
         }
-        CommandPlan::Doctor => {
-            writeln!(
-                stdout,
-                "doctor command scaffold: diagnostics are not implemented yet."
-            )
-            .map_err(|source| stdout_io_error("writing doctor output", &source))?;
-            Ok(())
-        }
+        CommandPlan::Doctor(args) => run_doctor(&args, stdout),
     }
 }
 
@@ -376,6 +369,155 @@ fn run_ports(stdout: &mut dyn Write) -> Result<(), RunError> {
     }
 
     Ok(())
+}
+
+fn run_doctor(args: &DoctorArgs, stdout: &mut dyn Write) -> Result<(), RunError> {
+    let mut failures = 0_u32;
+
+    write_doctor_line(
+        stdout,
+        "INFO",
+        "os",
+        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+    )?;
+
+    match discover_ports() {
+        Ok(ports) => write_doctor_line(
+            stdout,
+            "INFO",
+            "ports",
+            format!("discovered {} serial port(s)", ports.len()),
+        )?,
+        Err(error) => write_doctor_line(
+            stdout,
+            "INFO",
+            "ports",
+            format!("serial port enumeration unavailable: {error}"),
+        )?,
+    }
+
+    if let Some(port) = args.port.as_deref() {
+        match SerialTransport::open(port.to_owned(), args.baud, Duration::from_millis(250)) {
+            Ok(_) => write_doctor_line(
+                stdout,
+                "PASS",
+                "port",
+                format!("{port} opened at {} baud", args.baud),
+            )?,
+            Err(error) => {
+                failures += 1;
+                write_doctor_line(stdout, "FAIL", "port", format!("{port}: {error}"))?;
+            }
+        }
+    } else {
+        write_doctor_line(
+            stdout,
+            "SKIP",
+            "port",
+            "not provided; pass --port to probe device access",
+        )?;
+    }
+
+    failures += check_doctor_image(
+        stdout,
+        "preloader",
+        args.preloader.as_deref(),
+        AN7581.flash.preloader.byte_len(AN7581.flash.block_size),
+    )?;
+    failures += check_doctor_image(
+        stdout,
+        "fip",
+        args.fip.as_deref(),
+        AN7581.flash.fip.byte_len(AN7581.flash.block_size),
+    )?;
+
+    if failures == 0 {
+        write_doctor_line(stdout, "PASS", "summary", "all requested checks passed")?;
+        Ok(())
+    } else {
+        write_doctor_line(
+            stdout,
+            "FAIL",
+            "summary",
+            format!("{failures} requested check(s) failed"),
+        )?;
+        Err(RunError::Input(InputError::new(format!(
+            "doctor found {failures} failing check(s)",
+        ))))
+    }
+}
+
+fn check_doctor_image(
+    stdout: &mut dyn Write,
+    label: &'static str,
+    path: Option<&Path>,
+    max_bytes: u64,
+) -> Result<u32, RunError> {
+    let Some(path) = path else {
+        write_doctor_line(
+            stdout,
+            "SKIP",
+            label,
+            format!("not provided; pass --{label} to validate the image"),
+        )?;
+        return Ok(0);
+    };
+
+    match fs::read(path) {
+        Ok(payload) => {
+            let size = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+            if size == 0 {
+                write_doctor_line(
+                    stdout,
+                    "FAIL",
+                    label,
+                    format!("{} is empty", path.display()),
+                )?;
+                Ok(1)
+            } else if size > max_bytes {
+                write_doctor_line(
+                    stdout,
+                    "FAIL",
+                    label,
+                    format!(
+                        "{} is {size} bytes, exceeding the allocated flash window of {max_bytes} bytes",
+                        path.display()
+                    ),
+                )?;
+                Ok(1)
+            } else {
+                write_doctor_line(
+                    stdout,
+                    "PASS",
+                    label,
+                    format!(
+                        "{} is readable and fits in {max_bytes} bytes",
+                        path.display()
+                    ),
+                )?;
+                Ok(0)
+            }
+        }
+        Err(error) => {
+            write_doctor_line(
+                stdout,
+                "FAIL",
+                label,
+                format!("{} could not be read: {error}", path.display()),
+            )?;
+            Ok(1)
+        }
+    }
+}
+
+fn write_doctor_line(
+    stdout: &mut dyn Write,
+    status: &str,
+    label: &str,
+    detail: impl std::fmt::Display,
+) -> Result<(), RunError> {
+    writeln!(stdout, "[{status}] {label}: {detail}")
+        .map_err(|source| stdout_io_error("writing doctor output", &source))
 }
 
 fn discover_ports() -> Result<Vec<SerialPortInfo>, RunError> {
@@ -1111,7 +1253,7 @@ enum Commands {
         shell: Shell,
     },
     Man,
-    Doctor,
+    Doctor(Box<DoctorArgs>),
 }
 
 #[allow(
@@ -1190,6 +1332,18 @@ impl RecoverArgs {
     }
 }
 
+#[derive(Debug, Clone, Args)]
+struct DoctorArgs {
+    #[arg(long)]
+    port: Option<String>,
+    #[arg(long, default_value_t = 115_200)]
+    baud: u32,
+    #[arg(long)]
+    preloader: Option<PathBuf>,
+    #[arg(long)]
+    fip: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProgressMode {
     Auto,
@@ -1247,7 +1401,7 @@ enum CommandPlan {
     Ports,
     Completions { shell: Shell },
     Man,
-    Doctor,
+    Doctor(Box<DoctorArgs>),
 }
 
 #[derive(Debug)]
@@ -1420,7 +1574,11 @@ mod tests {
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
+    use std::fs;
+    use std::fs::File;
     use std::io::{self, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use unbrk_core::error::UnbrkError;
     use unbrk_core::event::{Event, EventPayload, RecoveryStage};
@@ -1433,6 +1591,7 @@ mod tests {
     const PORT: &str = "/dev/ttyUSB0";
     const PRELOADER: &str = "preloader.bin";
     const FIP: &str = "image.fip";
+    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn tty_status(stdout_is_tty: bool) -> TerminalStatus {
         TerminalStatus {
@@ -2290,6 +2449,57 @@ mod tests {
     }
 
     #[test]
+    fn doctor_command_reports_passing_image_checks() {
+        let preloader = temp_file_with_size(4);
+        let fip = temp_file_with_size(4);
+
+        let rendered = render(
+            &[
+                "unbrk",
+                "doctor",
+                "--preloader",
+                preloader.path.to_str().unwrap(),
+                "--fip",
+                fip.path.to_str().unwrap(),
+            ],
+            tty_status(true),
+        );
+
+        assert!(rendered.contains("[INFO] os:"));
+        assert!(rendered.contains("[SKIP] port:"));
+        assert!(rendered.contains("[PASS] preloader:"));
+        assert!(rendered.contains("[PASS] fip:"));
+        assert!(rendered.contains("[PASS] summary: all requested checks passed"));
+    }
+
+    #[test]
+    fn doctor_command_fails_for_oversized_preloader_image() {
+        let preloader = temp_file_with_size(129_025);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = try_run(
+            [
+                "unbrk",
+                "doctor",
+                "--preloader",
+                preloader.path.to_str().unwrap(),
+            ],
+            tty_status(true),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.exit_code(), CliExitCode::BadInput);
+        assert!(error.to_string().contains("doctor found 1 failing check"));
+
+        let rendered = String::from_utf8(stdout).unwrap();
+        assert!(rendered.contains("[FAIL] preloader:"));
+        assert!(rendered.contains("allocated flash window"));
+        assert!(rendered.contains("[FAIL] summary: 1 requested check(s) failed"));
+    }
+
+    #[test]
     fn man_command_stdout_errors_are_not_reported_as_serial_errors() {
         let mut stdout = BrokenWriter;
         let mut stderr = Vec::new();
@@ -2561,6 +2771,31 @@ mod tests {
         SerialPortInfo {
             port_name: String::from(port_name),
             port_type: SerialPortType::BluetoothPort,
+        }
+    }
+
+    fn temp_file_with_size(size: u64) -> TempFile {
+        let path = unique_temp_path();
+        let file = File::create(&path).unwrap();
+        file.set_len(size).unwrap();
+        TempFile { path }
+    }
+
+    fn unique_temp_path() -> PathBuf {
+        let unique_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "unbrk-cli-tests-{}-{unique_id}.bin",
+            std::process::id()
+        ))
+    }
+
+    struct TempFile {
+        path: PathBuf,
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ignored = fs::remove_file(&self.path);
         }
     }
 
