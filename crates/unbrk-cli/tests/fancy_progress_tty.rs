@@ -44,7 +44,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            rendered.contains("██  ██  ██  ██"),
+            rendered.contains("▐▌  ▐▌ ▐▌  ▐▌"),
             "expected the ANSI logo in PTY output:\n{rendered}"
         );
         assert!(
