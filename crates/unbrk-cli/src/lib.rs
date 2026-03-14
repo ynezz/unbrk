@@ -71,7 +71,7 @@ pub fn run() -> ExitCode {
     ) {
         Ok(()) => CliExitCode::Success.into(),
         Err(error) => {
-            let _ignored = writeln!(stderr, "{error}");
+            let _ignored = writeln!(stderr, "{}", error.styled());
             error.exit_code().into()
         }
     }
@@ -2237,6 +2237,27 @@ impl RunError {
             Self::VerificationMismatch(_) => CliExitCode::VerificationMismatch,
             Self::UserAbort(_) => CliExitCode::UserAbort,
         }
+    }
+
+    /// Return a terminal-styled version of this error for stderr output.
+    ///
+    /// Uses bold red for the error category label and an emoji prefix.
+    /// Styling respects `CLICOLOR` / TTY detection via the `console` crate.
+    fn styled(&self) -> String {
+        static EMOJI_ERROR: Emoji<'_, '_> = Emoji("\u{274c} ", "");
+        let label_style = Style::new().bold().red().for_stderr();
+        let (label, detail) = match self {
+            Self::Input(error) => return format!("{EMOJI_ERROR}{error}"),
+            Self::Io(error) => ("I/O error:", error.to_string()),
+            Self::Serial(error) => ("serial error:", error.to_string()),
+            Self::Timeout(msg) => ("timeout:", msg.clone()),
+            Self::Protocol(msg) => ("protocol error:", msg.clone()),
+            Self::Xmodem(msg) => ("xmodem failure:", msg.clone()),
+            Self::UBootCommand(msg) => ("U-Boot command failure:", msg.clone()),
+            Self::VerificationMismatch(msg) => ("verification mismatch:", msg.clone()),
+            Self::UserAbort(msg) => ("user abort:", msg.clone()),
+        };
+        format!("{EMOJI_ERROR}{} {detail}", label_style.apply_to(label))
     }
 }
 
