@@ -429,10 +429,7 @@ fn normalize_port_name(port_name: &str) -> String {
     let Some(file_name) = relative_path.file_name() else {
         return String::from(port_name);
     };
-    Path::new("/dev")
-        .join(file_name)
-        .to_string_lossy()
-        .into_owned()
+    format!("/dev/{}", file_name.to_string_lossy())
 }
 
 fn is_plausible_recovery_port(port: &SerialPortInfo) -> bool {
