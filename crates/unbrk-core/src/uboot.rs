@@ -5,29 +5,30 @@ use crate::event::RecoveryStage;
 use crate::prompt::find_prompt_allowing_trailing_space_with_regex;
 use crate::target::PromptPattern;
 use crate::transport::Transport;
-use regex::{Regex, bytes::Regex as BytesRegex};
+use regex::bytes::Regex as BytesRegex;
 use std::{sync::LazyLock, time::Duration};
 
 /// Default timeout for one U-Boot command round-trip.
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
-static LOADADDR_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"loadaddr=([0-9a-fA-Fx]+)").expect("static loadaddr regex is valid")
+static LOADADDR_REGEX: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(r"loadaddr=([0-9a-fA-Fx]+)").expect("static loadaddr regex is valid")
 });
-static FILESIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"filesize=([0-9a-fA-Fx]+)").expect("static filesize regex is valid")
+static FILESIZE_REGEX: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(r"filesize=([0-9a-fA-Fx]+)").expect("static filesize regex is valid")
 });
-static MMC_ERASE_SUCCESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)blocks erased:\s+OK").expect("static MMC erase regex is valid")
+static MMC_ERASE_SUCCESS_REGEX: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(r"(?i)blocks erased:\s+OK").expect("static MMC erase regex is valid")
 });
-static MMC_WRITE_SUCCESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)blocks written:\s+OK").expect("static MMC write regex is valid")
+static MMC_WRITE_SUCCESS_REGEX: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(r"(?i)blocks written:\s+OK").expect("static MMC write regex is valid")
 });
-static TOTAL_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Total Size\s*=\s*0x([0-9a-fA-F]+)\s*=\s*([0-9]+)\s*Bytes")
+static TOTAL_SIZE_REGEX: LazyLock<BytesRegex> = LazyLock::new(|| {
+    BytesRegex::new(r"Total Size\s*=\s*0x([0-9a-fA-F]+)\s*=\s*([0-9]+)\s*Bytes")
         .expect("static Total Size regex is valid")
 });
+const TOTAL_SIZE_LABEL: &[u8] = b"Total Size";
 
 /// Parsed `loadaddr` value from `printenv loadaddr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,13 +195,12 @@ pub fn run_command(
 /// `loadaddr=` assignment.
 pub fn parse_loadaddr(output: &UBootCommandOutput) -> Result<LoadAddr, UnbrkError> {
     let value = capture_hex_value(output, &LOADADDR_REGEX, "U-Boot loadaddr")?;
-    let parsed = u32::try_from(parse_u_boot_hex(value.as_str(), output)?).map_err(|_| {
-        UnbrkError::Protocol {
+    let parsed =
+        u32::try_from(parse_u_boot_hex(value, output)?).map_err(|_| UnbrkError::Protocol {
             stage: RecoveryStage::UBoot,
             detail: format!("U-Boot loadaddr {value} does not fit in u32"),
             recent_console: ConsoleTail::from_buffer(output.as_bytes()),
-        }
-    })?;
+        })?;
 
     Ok(LoadAddr::new(parsed))
 }
@@ -213,7 +213,7 @@ pub fn parse_loadaddr(output: &UBootCommandOutput) -> Result<LoadAddr, UnbrkErro
 /// `filesize=` assignment.
 pub fn parse_filesize(output: &UBootCommandOutput) -> Result<FileSize, UnbrkError> {
     let value = capture_hex_value(output, &FILESIZE_REGEX, "U-Boot filesize")?;
-    Ok(FileSize::new(parse_u_boot_hex(value.as_str(), output)?))
+    Ok(FileSize::new(parse_u_boot_hex(value, output)?))
 }
 
 /// Verifies that `mmc erase` reported success.
@@ -251,22 +251,33 @@ pub fn parse_mmc_write_success(output: &UBootCommandOutput) -> Result<MmcWriteSu
 pub fn parse_optional_total_size(
     output: &UBootCommandOutput,
 ) -> Result<Option<TransferSize>, UnbrkError> {
-    let text = output.as_lossy_str();
-
-    if !text.contains("Total Size") {
+    if !output
+        .as_bytes()
+        .windows(TOTAL_SIZE_LABEL.len())
+        .any(|window| window == TOTAL_SIZE_LABEL)
+    {
         return Ok(None);
     }
 
-    let captures = TOTAL_SIZE_REGEX.captures(text.as_str()).ok_or_else(|| {
-        malformed_output_error(output, "loadx total size", &"missing expected fields")
-    })?;
+    let captures = TOTAL_SIZE_REGEX
+        .captures(output.as_bytes())
+        .ok_or_else(|| {
+            malformed_output_error(output, "loadx total size", &"missing expected fields")
+        })?;
 
-    let hex_bytes = u64::from_str_radix(captures.get(1).expect("capture exists").as_str(), 16)
+    let hex_value = capture_group_as_str(
+        output,
+        captures.get(1).expect("capture exists"),
+        "loadx total size hex",
+    )?;
+    let decimal_value = capture_group_as_str(
+        output,
+        captures.get(2).expect("capture exists"),
+        "loadx total size decimal",
+    )?;
+    let hex_bytes = u64::from_str_radix(hex_value, 16)
         .map_err(|error| malformed_output_error(output, "loadx total size hex", &error))?;
-    let decimal_bytes = captures
-        .get(2)
-        .expect("capture exists")
-        .as_str()
+    let decimal_bytes = decimal_value
         .parse::<u64>()
         .map_err(|error| malformed_output_error(output, "loadx total size decimal", &error))?;
 
@@ -321,17 +332,16 @@ fn first_line_end(bytes: &[u8]) -> Option<usize> {
     Some(cursor)
 }
 
-fn capture_hex_value(
-    output: &UBootCommandOutput,
-    regex: &Regex,
+fn capture_hex_value<'a>(
+    output: &'a UBootCommandOutput,
+    regex: &BytesRegex,
     label: &str,
-) -> Result<String, UnbrkError> {
-    let text = output.as_lossy_str();
+) -> Result<&'a str, UnbrkError> {
     let captures = regex
-        .captures(text.as_str())
+        .captures(output.as_bytes())
         .ok_or_else(|| missing_output_error(output, label))?;
 
-    Ok(captures.get(1).expect("capture exists").as_str().to_owned())
+    capture_group_as_str(output, captures.get(1).expect("capture exists"), label)
 }
 
 fn parse_u_boot_hex(value: &str, output: &UBootCommandOutput) -> Result<u64, UnbrkError> {
@@ -346,14 +356,23 @@ fn parse_u_boot_hex(value: &str, output: &UBootCommandOutput) -> Result<u64, Unb
 
 fn require_output(
     output: &UBootCommandOutput,
-    regex: &Regex,
+    regex: &BytesRegex,
     label: &str,
 ) -> Result<(), UnbrkError> {
-    if regex.is_match(output.as_lossy_str().as_str()) {
+    if regex.is_match(output.as_bytes()) {
         Ok(())
     } else {
         Err(missing_output_error(output, label))
     }
+}
+
+fn capture_group_as_str<'a>(
+    output: &'a UBootCommandOutput,
+    capture: regex::bytes::Match<'a>,
+    label: &str,
+) -> Result<&'a str, UnbrkError> {
+    std::str::from_utf8(capture.as_bytes())
+        .map_err(|error| malformed_output_error(output, label, &error))
 }
 
 fn missing_output_error(output: &UBootCommandOutput, label: &str) -> UnbrkError {
@@ -563,6 +582,13 @@ mod tests {
             UBootCommandOutput::new(b"xyzModem - CRC mode, 1024(SOH)/1024(STX) bytes\r\n".to_vec());
 
         assert_eq!(parse_optional_total_size(&output).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_filesize_matches_ascii_fields_with_non_utf8_uart_noise() {
+        let output = UBootCommandOutput::new(b"\xff\xfeuart noise\r\nfilesize=1f400\r\n".to_vec());
+
+        assert_eq!(parse_filesize(&output).unwrap(), FileSize::new(0x1f400));
     }
 
     #[test]

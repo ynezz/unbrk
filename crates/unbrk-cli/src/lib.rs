@@ -246,7 +246,7 @@ fn run_recover(
             stderr,
             "warning: --resume-from-uboot is expert-only and assumes the current U-Boot prompt is safe.",
         )
-        .map_err(RunError::Serial)?;
+        .map_err(|source| stderr_io_error("writing the resume-from-uboot warning", &source))?;
     }
 
     let port = recover_port(plan)?;
@@ -324,9 +324,25 @@ enum RecoverOutcome {
 }
 
 fn stdout_io_error(operation: &str, source: &io::Error) -> RunError {
+    local_io_error("stdout", operation, source)
+}
+
+fn stderr_io_error(operation: &str, source: &io::Error) -> RunError {
+    local_io_error("stderr", operation, source)
+}
+
+fn output_io_error(operation: &str, source: &io::Error) -> RunError {
+    local_io_error("output", operation, source)
+}
+
+fn terminal_io_error(operation: &str, source: &io::Error) -> RunError {
+    local_io_error("terminal", operation, source)
+}
+
+fn local_io_error(stream: &str, operation: &str, source: &io::Error) -> RunError {
     RunError::Io(io::Error::new(
         source.kind(),
-        format!("stdout I/O failed while {operation}: {source}"),
+        format!("{stream} I/O failed while {operation}: {source}"),
     ))
 }
 
@@ -349,12 +365,14 @@ fn run_ports(stdout: &mut dyn Write) -> Result<(), RunError> {
     let ports = discover_ports()?;
 
     if ports.is_empty() {
-        writeln!(stdout, "No serial ports found.").map_err(RunError::Serial)?;
+        writeln!(stdout, "No serial ports found.")
+            .map_err(|source| stdout_io_error("writing the ports listing", &source))?;
         return Ok(());
     }
 
     for line in render_ports_listing(&ports) {
-        writeln!(stdout, "{line}").map_err(RunError::Serial)?;
+        writeln!(stdout, "{line}")
+            .map_err(|source| stdout_io_error("writing the ports listing", &source))?;
     }
 
     Ok(())
@@ -484,8 +502,10 @@ fn handoff_console(transport: &mut impl Transport, stdout: &mut dyn Write) -> Re
         stdout,
         "Entering interactive console handoff. Press Ctrl-C or Ctrl-D to exit."
     )
-    .map_err(RunError::Serial)?;
-    stdout.flush().map_err(RunError::Serial)?;
+    .map_err(|source| stdout_io_error("writing the console handoff banner", &source))?;
+    stdout
+        .flush()
+        .map_err(|source| stdout_io_error("flushing the console handoff banner", &source))?;
 
     let _raw_mode = RawModeGuard::enable()?;
     transport
@@ -493,8 +513,11 @@ fn handoff_console(transport: &mut impl Transport, stdout: &mut dyn Write) -> Re
         .map_err(|source| serial_run_error("setting the console handoff timeout", &source))?;
     relay_console_handoff(transport, stdout)?;
 
-    writeln!(stdout, "\r\nLeft interactive console handoff.").map_err(RunError::Serial)?;
-    stdout.flush().map_err(RunError::Serial)
+    writeln!(stdout, "\r\nLeft interactive console handoff.")
+        .map_err(|source| stdout_io_error("writing the console handoff footer", &source))?;
+    stdout
+        .flush()
+        .map_err(|source| stdout_io_error("flushing the console handoff footer", &source))
 }
 
 fn relay_console_handoff(
@@ -542,8 +565,10 @@ fn relay_console_handoff(
             Ok(read_len) => {
                 stdout
                     .write_all(&serial_buffer[..read_len])
-                    .map_err(RunError::Serial)?;
-                stdout.flush().map_err(RunError::Serial)?;
+                    .map_err(|source| stdout_io_error("writing console output", &source))?;
+                stdout
+                    .flush()
+                    .map_err(|source| stdout_io_error("flushing console output", &source))?;
             }
             Err(source) if source.kind() == io::ErrorKind::TimedOut => {}
             Err(source) => {
@@ -598,10 +623,7 @@ fn serial_run_error(operation: &'static str, source: &io::Error) -> RunError {
 }
 
 fn terminal_run_error(operation: &'static str, source: &io::Error) -> RunError {
-    RunError::Serial(io::Error::new(
-        source.kind(),
-        format!("terminal I/O failed while {operation}: {source}"),
-    ))
+    terminal_io_error(operation, source)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -975,7 +997,8 @@ fn next_sequence(events: &[Event]) -> u64 {
 fn write_events(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
     for event in events {
         serde_json::to_writer(&mut *writer, event).map_err(|error| map_json_event_error(&error))?;
-        writeln!(writer).map_err(RunError::Serial)?;
+        writeln!(writer)
+            .map_err(|source| output_io_error("writing the JSON event stream", &source))?;
     }
 
     Ok(())
@@ -983,8 +1006,8 @@ fn write_events(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError
 
 fn map_json_event_error(error: &serde_json::Error) -> RunError {
     if error.is_io() {
-        RunError::Serial(io::Error::other(format!(
-            "failed to write JSON event stream: {error}",
+        RunError::Io(io::Error::other(format!(
+            "output I/O failed while writing the JSON event stream: {error}",
         )))
     } else {
         RunError::Protocol(format!("failed to serialize JSON event stream: {error}"))
@@ -992,12 +1015,9 @@ fn map_json_event_error(error: &serde_json::Error) -> RunError {
 }
 
 fn flush_event_writer(writer: &mut dyn Write) -> Result<(), RunError> {
-    writer.flush().map_err(|error| {
-        RunError::Serial(io::Error::new(
-            error.kind(),
-            format!("failed to flush event stream: {error}"),
-        ))
-    })
+    writer
+        .flush()
+        .map_err(|error| output_io_error("flushing the event stream", &error))
 }
 
 fn write_events_and_flush(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
@@ -1018,7 +1038,8 @@ fn write_events_to_path(path: &Path, events: &[Event]) -> Result<(), RunError> {
 
 fn write_event_trace(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
     for event in events {
-        writeln!(writer, "{event}").map_err(RunError::Serial)?;
+        writeln!(writer, "{event}")
+            .map_err(|source| output_io_error("writing the event trace", &source))?;
     }
     Ok(())
 }
@@ -1037,7 +1058,7 @@ fn write_recover_summary(
         plan.no_console,
         plan.terminal_status.stdout_is_tty,
     )
-    .map_err(RunError::Serial)?;
+    .map_err(|source| stdout_io_error("writing the recovery summary header", &source))?;
 
     match outcome {
         RecoverOutcome::Recovered => {
@@ -1046,10 +1067,13 @@ fn write_recover_summary(
                     stdout,
                     "interactive console handoff ended at the RAM-resident U-Boot prompt."
                 )
-                .map_err(RunError::Serial)?;
+                .map_err(|source| {
+                    stdout_io_error("writing the recovery summary outcome", &source)
+                })?;
             } else {
-                writeln!(stdout, "stopped at the RAM-resident U-Boot prompt.")
-                    .map_err(RunError::Serial)?;
+                writeln!(stdout, "stopped at the RAM-resident U-Boot prompt.").map_err(
+                    |source| stdout_io_error("writing the recovery summary outcome", &source),
+                )?;
             }
         }
         RecoverOutcome::FlashedAfterRecovery { reset_evidence } => {
@@ -1057,14 +1081,14 @@ fn write_recover_summary(
                 stdout,
                 "completed recovery and persistent flash; observed reset evidence: {reset_evidence}"
             )
-            .map_err(RunError::Serial)?;
+            .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
         }
         RecoverOutcome::FlashedFromExistingPrompt { reset_evidence } => {
             writeln!(
                 stdout,
                 "resumed from an existing U-Boot prompt and completed the persistent flash; observed reset evidence: {reset_evidence}"
             )
-            .map_err(RunError::Serial)?;
+            .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
         }
     }
 
@@ -2294,7 +2318,33 @@ mod tests {
     }
 
     #[test]
-    fn json_write_errors_stay_serial_failures() {
+    fn resume_from_uboot_warning_stderr_errors_are_not_reported_as_serial_errors() {
+        let mut stdout = Vec::new();
+        let mut stderr = BrokenWriter;
+        let error = try_run(
+            ["unbrk", "recover", "--port", PORT, "--resume-from-uboot"],
+            tty_status(false),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+
+        match error {
+            RunError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("stderr I/O failed while writing the resume-from-uboot warning")
+                );
+                assert!(!format!("{}", RunError::Io(error)).contains("serial error"));
+            }
+            other => panic!("expected an I/O run error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_write_errors_are_reported_as_io_failures() {
         let events = [fixture_event(
             1,
             100,
@@ -2307,11 +2357,11 @@ mod tests {
 
         let error = write_events(&mut writer, &events).unwrap_err();
 
-        assert!(matches!(error, RunError::Serial(_)));
+        assert!(matches!(error, RunError::Io(_)));
         assert!(
             error
                 .to_string()
-                .contains("failed to write JSON event stream")
+                .contains("output I/O failed while writing the JSON event stream")
         );
     }
 
@@ -2333,8 +2383,12 @@ mod tests {
         let mut writer = FlushFailWriter;
         let error = flush_event_writer(&mut writer).unwrap_err();
 
-        assert!(matches!(error, RunError::Serial(_)));
-        assert!(error.to_string().contains("failed to flush event stream"));
+        assert!(matches!(error, RunError::Io(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("output I/O failed while flushing the event stream")
+        );
     }
 
     #[test]
@@ -2386,6 +2440,67 @@ mod tests {
 
         assert!(rendered.contains("opened serial port"));
         assert!(rendered.contains("prompt seen"));
+    }
+
+    #[test]
+    fn write_event_trace_errors_are_not_reported_as_serial_errors() {
+        let events = [fixture_event(
+            1,
+            100,
+            EventPayload::PortOpened {
+                port: String::from(PORT),
+                baud: 115_200,
+            },
+        )];
+        let mut output = BrokenWriter;
+        let error = write_event_trace(&mut output, &events).unwrap_err();
+
+        match error {
+            RunError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("output I/O failed while writing the event trace")
+                );
+                assert!(!format!("{}", RunError::Io(error)).contains("serial error"));
+            }
+            other => panic!("expected an I/O run error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_recover_summary_stdout_errors_are_not_reported_as_serial_errors() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+            ],
+            tty_status(false),
+        );
+        let mut stdout = BrokenWriter;
+        let error =
+            write_recover_summary(&mut stdout, &plan, PORT, &RecoverOutcome::Recovered, false)
+                .unwrap_err();
+
+        match error {
+            RunError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("stdout I/O failed while writing the recovery summary header")
+                );
+                assert!(!format!("{}", RunError::Io(error)).contains("serial error"));
+            }
+            other => panic!("expected an I/O run error, got {other:?}"),
+        }
     }
 
     struct BrokenWriter;
