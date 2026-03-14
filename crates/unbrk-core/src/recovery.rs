@@ -257,7 +257,7 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
 
     fn send_transfer(
         &mut self,
-        stage: TransferStage,
+        transfer_stage: TransferStage,
         payload: &[u8],
         prompt_pattern: PromptPattern,
         wait_state: RecoveryState,
@@ -266,7 +266,7 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
         let mut progress_events = Vec::new();
         let transfer = send_crc(
             self.transport,
-            stage,
+            transfer_stage,
             payload,
             self.config.xmodem,
             |progress| progress_events.push(progress),
@@ -290,29 +290,33 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
             }
             Err(error) => {
                 self.push_state(wait_state);
-                match wait_target {
+                let prompt_result = match wait_target {
                     WaitTarget::RecoveryPrompt {
                         stage: recovery_stage,
                         operation,
                         event,
-                    } => {
-                        let prompt =
-                            self.read_stage_prompt(prompt_pattern, recovery_stage, operation)?;
-                        self.emit_completed_from_payload(stage, payload, true);
-                        if let EventPayload::PromptSeen { stage, .. } = event {
-                            self.emit(EventPayload::PromptSeen {
-                                stage,
-                                prompt: prompt.prompt,
-                            });
-                        }
+                    } => self
+                        .read_stage_prompt(prompt_pattern, recovery_stage, operation)
+                        .map(|prompt| (Some(event), prompt)),
+                    WaitTarget::UBootPrompt { operation } => self
+                        .read_uboot_prompt(prompt_pattern, operation)
+                        .map(|prompt| (None, prompt)),
+                };
+
+                match prompt_result {
+                    Ok((Some(EventPayload::PromptSeen { stage, .. }), prompt)) => {
+                        self.emit_completed_from_payload(transfer_stage, payload, true);
+                        self.emit(EventPayload::PromptSeen {
+                            stage,
+                            prompt: prompt.prompt,
+                        });
                         Ok(TransferOutcome {
                             recovered_from_eot_quirk: true,
                             prompt_emitted: true,
                         })
                     }
-                    WaitTarget::UBootPrompt { operation } => {
-                        let prompt = self.read_uboot_prompt(prompt_pattern, operation)?;
-                        self.emit_completed_from_payload(stage, payload, true);
+                    Ok((None, prompt)) => {
+                        self.emit_completed_from_payload(transfer_stage, payload, true);
                         self.emit(EventPayload::UBootPromptSeen {
                             prompt: prompt.prompt,
                         });
@@ -321,8 +325,13 @@ impl<'a, T: Transport> RecoveryRunner<'a, T> {
                             prompt_emitted: true,
                         })
                     }
+                    Err(prompt_error) => {
+                        Err(self.xmodem_failure(&error, &prompt_error, transfer_stage))
+                    }
+                    Ok((Some(_), _)) => {
+                        unreachable!("recovery prompt wait targets always emit PromptSeen")
+                    }
                 }
-                .map_err(|prompt_error| self.xmodem_failure(&error, &prompt_error, stage))
             }
         }
     }

@@ -38,11 +38,31 @@ const EXPECTED_STATES: [RecoveryState; 10] = [
 pub enum ReplayPoint {
     InitialPrompt,
     PreloaderCrc,
+    PreloaderTransferAck,
+    PreloaderEotResponse,
     InterstageChatter,
     FipPrompt,
     FipCrc,
+    FipTransferAck,
+    FipEotResponse,
     UbootBootNoise,
     UbootPrompt,
+    FlashWakePrompt,
+    LoadaddrOutput,
+    EraseOutput,
+    LoadxPreloaderCrc,
+    LoadxPreloaderTransferAck,
+    LoadxPreloaderEotResponse,
+    LoadxPreloaderOutput,
+    FilesizePreloaderOutput,
+    MmcWritePreloaderOutput,
+    LoadxFipCrc,
+    LoadxFipTransferAck,
+    LoadxFipEotResponse,
+    LoadxFipOutput,
+    FilesizeFipOutput,
+    MmcWriteFipOutput,
+    ResetOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +174,12 @@ impl FixtureRecoveryScenario {
     }
 
     #[must_use]
+    pub const fn with_xmodem(mut self, xmodem: XmodemConfig) -> Self {
+        self.xmodem = xmodem;
+        self
+    }
+
+    #[must_use]
     pub const fn expected_states() -> &'static [RecoveryState] {
         &EXPECTED_STATES
     }
@@ -173,17 +199,31 @@ impl FixtureRecoveryScenario {
     ///
     /// Returns any typed recovery or flash failure from the core flows.
     pub fn run_with_flash(&self) -> Result<FixtureRecoveryAndFlashRun, UnbrkError> {
+        self.run_with_flash_overrides(std::iter::empty::<(ReplayPoint, [MockStep; 0])>())
+    }
+
+    /// Runs the fixture replay through recovery and the persistent flash phase
+    /// with targeted scripted-step overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns any typed recovery or flash failure from the core flows.
+    pub fn run_with_flash_overrides<I, J>(
+        &self,
+        overrides: I,
+    ) -> Result<FixtureRecoveryAndFlashRun, UnbrkError>
+    where
+        I: IntoIterator<Item = (ReplayPoint, J)>,
+        J: IntoIterator<Item = MockStep>,
+    {
         let preloader = TempFile::with_bytes(&self.preloader);
         let fip = TempFile::with_bytes(&self.fip);
         let plan = AN7581.flash_plan(preloader.path.clone(), fip.path.clone());
-        let mut script = self
-            .script()
-            .into_iter()
-            .map(|entry| entry.step)
-            .collect::<Vec<_>>();
+        let mut script = self.script();
         script.extend(self.flash_script());
+        Self::apply_overrides(&mut script, overrides);
 
-        let mut transport = MockTransport::new(script);
+        let mut transport = MockTransport::new(script.into_iter().map(|entry| entry.step));
         let recovery = recover_to_uboot(
             &mut transport,
             AN7581,
@@ -219,17 +259,22 @@ impl FixtureRecoveryScenario {
     where
         I: IntoIterator<Item = (ReplayPoint, MockStep)>,
     {
+        self.run_with_script_overrides(overrides.into_iter().map(|(point, step)| (point, [step])))
+    }
+
+    /// Runs the fixture replay with targeted scripted-step overrides that may
+    /// replace one replay point with multiple read-oriented steps.
+    ///
+    /// # Errors
+    ///
+    /// Returns any typed recovery failure produced by `recover_to_uboot()`.
+    pub fn run_with_script_overrides<I, J>(&self, overrides: I) -> Result<FixtureRun, UnbrkError>
+    where
+        I: IntoIterator<Item = (ReplayPoint, J)>,
+        J: IntoIterator<Item = MockStep>,
+    {
         let mut script = self.script();
-        for (point, step) in overrides {
-            let target = script
-                .iter_mut()
-                .find(|entry| {
-                    entry.point == point
-                        && matches!(entry.step, MockStep::Read(_) | MockStep::ReadError { .. })
-                })
-                .unwrap_or_else(|| panic!("missing replay point override target: {point:?}"));
-            target.step = step;
-        }
+        Self::apply_overrides(&mut script, overrides);
 
         let mut transport = MockTransport::new(script.into_iter().map(|entry| entry.step));
         let report = recover_to_uboot(
@@ -249,6 +294,38 @@ impl FixtureRecoveryScenario {
             transport,
             expected_console: self.fixtures.expected_recovery_console(),
         })
+    }
+
+    fn apply_overrides<I, J>(script: &mut Vec<LabeledStep>, overrides: I)
+    where
+        I: IntoIterator<Item = (ReplayPoint, J)>,
+        J: IntoIterator<Item = MockStep>,
+    {
+        for (point, steps) in overrides {
+            let index = script
+                .iter()
+                .position(|entry| {
+                    entry.point == point
+                        && matches!(entry.step, MockStep::Read(_) | MockStep::ReadError { .. })
+                })
+                .unwrap_or_else(|| panic!("missing replay point override target: {point:?}"));
+
+            let replacement = steps
+                .into_iter()
+                .map(|step| {
+                    assert!(
+                        matches!(
+                            step,
+                            MockStep::Read(_) | MockStep::ReadError { .. } | MockStep::Delay(_)
+                        ),
+                        "invalid override step for {point:?}: {step:?}",
+                    );
+                    LabeledStep::new(point, step)
+                })
+                .collect::<Vec<_>>();
+
+            script.splice(index..=index, replacement);
+        }
     }
 
     fn script(&self) -> Vec<LabeledStep> {
@@ -276,10 +353,16 @@ impl FixtureRecoveryScenario {
             ),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Write(preloader_packet)),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Flush),
-            LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Read(vec![XMODEM_ACK])),
+            LabeledStep::new(
+                ReplayPoint::PreloaderTransferAck,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Write(vec![XMODEM_EOT])),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Flush),
-            LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Read(vec![XMODEM_ACK])),
+            LabeledStep::new(
+                ReplayPoint::PreloaderEotResponse,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
             LabeledStep::new(
                 ReplayPoint::InterstageChatter,
                 MockStep::SetTimeout(self.prompt_timeout),
@@ -304,10 +387,16 @@ impl FixtureRecoveryScenario {
             ),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Write(fip_packet)),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Flush),
-            LabeledStep::new(ReplayPoint::FipCrc, MockStep::Read(vec![XMODEM_ACK])),
+            LabeledStep::new(
+                ReplayPoint::FipTransferAck,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Write(vec![XMODEM_EOT])),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Flush),
-            LabeledStep::new(ReplayPoint::FipCrc, MockStep::Read(vec![XMODEM_ACK])),
+            LabeledStep::new(
+                ReplayPoint::FipEotResponse,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
             LabeledStep::new(
                 ReplayPoint::UbootBootNoise,
                 MockStep::SetTimeout(self.prompt_timeout),
@@ -323,86 +412,190 @@ impl FixtureRecoveryScenario {
         ]
     }
 
-    fn flash_script(&self) -> Vec<MockStep> {
+    #[allow(clippy::too_many_lines)]
+    fn flash_script(&self) -> Vec<LabeledStep> {
         let preloader_packet = build_crc_packet(1, &self.preloader);
         let fip_packet = build_crc_packet(1, &self.fip);
 
         vec![
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(vec![b'\r']),
-            MockStep::Flush,
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"\r\nAN7581> ".to_vec()),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"printenv loadaddr\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(
+            LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::Write(vec![b'\r'])),
+            LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::Flush),
+            LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(
+                ReplayPoint::FlashWakePrompt,
+                MockStep::Read(b"\r\nAN7581> ".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::LoadaddrOutput, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(
+                ReplayPoint::LoadaddrOutput,
+                MockStep::Write(b"printenv loadaddr\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::LoadaddrOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadaddrOutput,
+                MockStep::Read(
                 b"AN7581> printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> ".to_vec(),
+            )),
+            LabeledStep::new(ReplayPoint::EraseOutput, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(
+                ReplayPoint::EraseOutput,
+                MockStep::Write(b"mmc erase 0x0 0x800\n".to_vec()),
             ),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"mmc erase 0x0 0x800\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(
+            LabeledStep::new(ReplayPoint::EraseOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::EraseOutput,
+                MockStep::Read(
                 b"AN7581> mmc erase 0x0 0x800\r\n2048 blocks erased: OK\r\nAN7581> ".to_vec(),
+            )),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderCrc,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
             ),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
-            MockStep::Flush,
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
-            MockStep::Write(preloader_packet),
-            MockStep::Flush,
-            MockStep::Read(vec![XMODEM_ACK]),
-            MockStep::Write(vec![XMODEM_EOT]),
-            MockStep::Flush,
-            MockStep::Read(vec![XMODEM_ACK]),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"printenv filesize\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=4\r\nAN7581> ".to_vec()),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"mmc write $loadaddr 0x4 0xfc\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderCrc,
+                MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::LoadxPreloaderCrc, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderCrc,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderCrc,
+                MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderCrc,
+                MockStep::Write(preloader_packet),
+            ),
+            LabeledStep::new(ReplayPoint::LoadxPreloaderCrc, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderTransferAck,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderCrc,
+                MockStep::Write(vec![XMODEM_EOT]),
+            ),
+            LabeledStep::new(ReplayPoint::LoadxPreloaderCrc, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderEotResponse,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxPreloaderOutput,
+                MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
+            ),
+            LabeledStep::new(
+                ReplayPoint::FilesizePreloaderOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::FilesizePreloaderOutput,
+                MockStep::Write(b"printenv filesize\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::FilesizePreloaderOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::FilesizePreloaderOutput,
+                MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=4\r\nAN7581> ".to_vec()),
+            ),
+            LabeledStep::new(
+                ReplayPoint::MmcWritePreloaderOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::MmcWritePreloaderOutput,
+                MockStep::Write(b"mmc write $loadaddr 0x4 0xfc\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::MmcWritePreloaderOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::MmcWritePreloaderOutput,
+                MockStep::Read(
                 b"AN7581> mmc write $loadaddr 0x4 0xfc\r\n252 blocks written: OK\r\nAN7581> "
                     .to_vec(),
+            )),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipCrc,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
             ),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
-            MockStep::Flush,
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
-            MockStep::Write(fip_packet),
-            MockStep::Flush,
-            MockStep::Read(vec![XMODEM_ACK]),
-            MockStep::Write(vec![XMODEM_EOT]),
-            MockStep::Flush,
-            MockStep::Read(vec![XMODEM_ACK]),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"printenv filesize\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec()),
-            MockStep::SetTimeout(COMMAND_TIMEOUT),
-            MockStep::Write(b"mmc write $loadaddr 0x100 0x700\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(
+            LabeledStep::new(
+                ReplayPoint::LoadxFipCrc,
+                MockStep::Write(b"loadx $loadaddr 115200\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::LoadxFipCrc, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipCrc,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipCrc,
+                MockStep::Read(b"loadx $loadaddr 115200\r\nCCC".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::LoadxFipCrc, MockStep::Write(fip_packet)),
+            LabeledStep::new(ReplayPoint::LoadxFipCrc, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipTransferAck,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
+            LabeledStep::new(ReplayPoint::LoadxFipCrc, MockStep::Write(vec![XMODEM_EOT])),
+            LabeledStep::new(ReplayPoint::LoadxFipCrc, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipEotResponse,
+                MockStep::Read(vec![XMODEM_ACK]),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::LoadxFipOutput,
+                MockStep::Read(b"\r\nTotal Size = 0x4 = 4 Bytes\r\nAN7581> ".to_vec()),
+            ),
+            LabeledStep::new(
+                ReplayPoint::FilesizeFipOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::FilesizeFipOutput,
+                MockStep::Write(b"printenv filesize\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::FilesizeFipOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::FilesizeFipOutput,
+                MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec()),
+            ),
+            LabeledStep::new(
+                ReplayPoint::MmcWriteFipOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::MmcWriteFipOutput,
+                MockStep::Write(b"mmc write $loadaddr 0x100 0x700\n".to_vec()),
+            ),
+            LabeledStep::new(ReplayPoint::MmcWriteFipOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::MmcWriteFipOutput,
+                MockStep::Read(
                 b"AN7581> mmc write $loadaddr 0x100 0x700\r\n1792 blocks written: OK\r\nAN7581> "
                     .to_vec(),
-            ),
-            MockStep::SetTimeout(RESET_TIMEOUT),
-            MockStep::Write(b"reset\n".to_vec()),
-            MockStep::Flush,
-            MockStep::Read(
+            )),
+            LabeledStep::new(ReplayPoint::ResetOutput, MockStep::SetTimeout(RESET_TIMEOUT)),
+            LabeledStep::new(ReplayPoint::ResetOutput, MockStep::Write(b"reset\n".to_vec())),
+            LabeledStep::new(ReplayPoint::ResetOutput, MockStep::Flush),
+            LabeledStep::new(
+                ReplayPoint::ResetOutput,
+                MockStep::Read(
                 fs::read(
                     Path::new(env!("CARGO_MANIFEST_DIR"))
                         .join("../../tests/fixtures/an7581/reset-evidence.bin"),
                 )
                 .expect("reset fixture must load"),
-            ),
+            )),
         ]
     }
 }
