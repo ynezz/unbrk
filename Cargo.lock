@@ -445,6 +445,7 @@ dependencies = [
  "is-terminal",
  "regex",
  "serde_json",
+ "serialport5",
  "unbrk-core",
 ]
 

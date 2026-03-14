@@ -7,6 +7,7 @@ use clap_complete::generate;
 use clap_mangen::Man;
 use is_terminal::IsTerminal;
 use regex::Regex;
+use serialport::{SerialPortInfo, SerialPortType, available_ports};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -207,14 +208,7 @@ fn dispatch(
 ) -> Result<(), RunError> {
     match command {
         CommandPlan::Recover(plan) => run_recover(&plan, stdout, stderr),
-        CommandPlan::Ports => {
-            writeln!(
-                stdout,
-                "ports command scaffold: port enumeration is not implemented yet."
-            )
-            .map_err(RunError::Serial)?;
-            Ok(())
-        }
+        CommandPlan::Ports => run_ports(stdout),
         CommandPlan::Completions { shell } => {
             let mut command = cli_command();
             generate(shell, &mut command, "unbrk", stdout);
@@ -250,7 +244,7 @@ fn run_recover(
         .map_err(RunError::Serial)?;
     }
 
-    let port = recover_port(&plan.args)?;
+    let port = recover_port(plan)?;
     let target = target_profile(&plan.args);
     let mut events = Vec::new();
     push_event(
@@ -308,12 +302,153 @@ enum RecoverOutcome {
     FlashedFromExistingPrompt { reset_evidence: String },
 }
 
-fn recover_port(args: &RecoverArgs) -> Result<String, RunError> {
-    args.port.clone().ok_or_else(|| {
-        RunError::Input(InputError::new(
-            "automatic port selection is not implemented yet; pass --port explicitly",
-        ))
-    })
+fn recover_port(plan: &RecoverPlan) -> Result<String, RunError> {
+    if let Some(port) = &plan.args.port {
+        return Ok(port.clone());
+    }
+
+    if !plan.terminal_status.stdin_is_tty || !plan.terminal_status.stdout_is_tty {
+        return Err(RunError::Input(InputError::new(
+            "automatic port selection is only available in interactive mode; pass --port explicitly",
+        )));
+    }
+
+    let ports = discover_ports()?;
+    select_recover_port(&ports)
+}
+
+fn run_ports(stdout: &mut dyn Write) -> Result<(), RunError> {
+    let ports = discover_ports()?;
+
+    if ports.is_empty() {
+        writeln!(stdout, "No serial ports found.").map_err(RunError::Serial)?;
+        return Ok(());
+    }
+
+    for line in render_ports_listing(&ports) {
+        writeln!(stdout, "{line}").map_err(RunError::Serial)?;
+    }
+
+    Ok(())
+}
+
+fn discover_ports() -> Result<Vec<SerialPortInfo>, RunError> {
+    let mut ports = available_ports().map_err(|error| {
+        RunError::Serial(io::Error::other(format!(
+            "failed to enumerate serial ports: {error}",
+        )))
+    })?;
+    normalize_discovered_ports(&mut ports);
+    ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    Ok(ports)
+}
+
+fn select_recover_port(ports: &[SerialPortInfo]) -> Result<String, RunError> {
+    let plausible = plausible_ports(ports);
+
+    match plausible.as_slice() {
+        [port] => Ok(port.port_name.clone()),
+        [] => Err(RunError::Input(InputError::new(
+            "automatic port selection found no plausible serial ports; run `unbrk ports` or pass --port explicitly",
+        ))),
+        _ => Err(RunError::Input(InputError::new(format!(
+            "automatic port selection found multiple plausible serial ports ({}); pass --port explicitly",
+            plausible
+                .iter()
+                .map(|port| port.port_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))),
+    }
+}
+
+fn plausible_ports(ports: &[SerialPortInfo]) -> Vec<&SerialPortInfo> {
+    ports
+        .iter()
+        .filter(|port| is_plausible_recovery_port(port))
+        .collect()
+}
+
+fn normalize_discovered_ports(ports: &mut [SerialPortInfo]) {
+    for port in ports {
+        port.port_name = normalize_port_name(&port.port_name);
+    }
+}
+
+fn normalize_port_name(port_name: &str) -> String {
+    let path = Path::new(port_name);
+    let Ok(relative_path) = path.strip_prefix("/sys/class/tty") else {
+        return String::from(port_name);
+    };
+    let Some(file_name) = relative_path.file_name() else {
+        return String::from(port_name);
+    };
+    Path::new("/dev")
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn is_plausible_recovery_port(port: &SerialPortInfo) -> bool {
+    if matches!(port.port_type, SerialPortType::BluetoothPort) {
+        return false;
+    }
+
+    let name = Path::new(&port.port_name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(port.port_name.as_str())
+        .to_ascii_lowercase();
+    if name.contains("modem") || name.contains("rfcomm") || name.contains("bluetooth") {
+        return false;
+    }
+
+    matches!(port.port_type, SerialPortType::UsbPort(_))
+        || name.contains("ttyusb")
+        || name.contains("ttyacm")
+        || name.contains("tty.usb")
+        || name.contains("cu.usb")
+        || name.starts_with("com")
+}
+
+fn render_ports_listing(ports: &[SerialPortInfo]) -> Vec<String> {
+    ports.iter().map(render_port_line).collect()
+}
+
+fn render_port_line(port: &SerialPortInfo) -> String {
+    let plausibility = if is_plausible_recovery_port(port) {
+        "plausible"
+    } else {
+        "ignored"
+    };
+    format!(
+        "{} [{}] {}",
+        port.port_name,
+        plausibility,
+        describe_port_type(&port.port_type)
+    )
+}
+
+fn describe_port_type(port_type: &SerialPortType) -> String {
+    match port_type {
+        SerialPortType::UsbPort(info) => format!(
+            "USB VID:{:04x} PID:{:04x}{}{}{}",
+            info.vid,
+            info.pid,
+            info.manufacturer
+                .as_deref()
+                .map_or(String::new(), |value| format!(" manufacturer={value}")),
+            info.product
+                .as_deref()
+                .map_or(String::new(), |value| format!(" product={value}")),
+            info.serial_number
+                .as_deref()
+                .map_or(String::new(), |value| format!(" serial={value}")),
+        ),
+        SerialPortType::PciPort => String::from("PCI serial"),
+        SerialPortType::BluetoothPort => String::from("Bluetooth serial"),
+        SerialPortType::Unknown => String::from("Unknown transport"),
+    }
 }
 
 fn open_transport(port: &str, args: &RecoverArgs) -> Result<CliTransport, RunError> {
@@ -1075,10 +1210,12 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 mod tests {
     use super::{
         CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
-        TerminalStatus, append_events, build_flash_plan, flush_event_writer, map_json_event_error,
-        parse_command, target_profile, try_run, wait_for_uboot_prompt, write_event_trace,
-        write_events, xmodem_config,
+        TerminalStatus, append_events, build_flash_plan, flush_event_writer,
+        is_plausible_recovery_port, map_json_event_error, normalize_port_name, parse_command,
+        render_port_line, select_recover_port, target_profile, try_run, wait_for_uboot_prompt,
+        write_event_trace, write_events, xmodem_config,
     };
+    use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
     use std::io::{self, Write};
     use std::time::Duration;
     use unbrk_core::error::UnbrkError;
@@ -1592,6 +1729,71 @@ mod tests {
     }
 
     #[test]
+    fn auto_selection_picks_the_only_plausible_port() {
+        let selected = select_recover_port(&[
+            bluetooth_port("/dev/rfcomm0"),
+            usb_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI", "FT232R"),
+        ])
+        .unwrap();
+
+        assert_eq!(selected, "/dev/ttyUSB0");
+    }
+
+    #[test]
+    fn auto_selection_rejects_multiple_plausible_ports() {
+        let error = select_recover_port(&[
+            usb_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI", "FT232R"),
+            unknown_port("/dev/ttyACM0"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.exit_code(), CliExitCode::BadInput);
+        assert!(error.to_string().contains("/dev/ttyUSB0, /dev/ttyACM0"));
+    }
+
+    #[test]
+    fn auto_selection_ignores_generic_ttys() {
+        let selected = select_recover_port(&[
+            unknown_port("/dev/ttyS4"),
+            usb_port("/dev/ttyUSB0", 0x0403, 0x6001, "FTDI", "FT232R"),
+        ])
+        .unwrap();
+
+        assert_eq!(selected, "/dev/ttyUSB0");
+    }
+
+    #[test]
+    fn port_rendering_marks_bluetooth_as_ignored() {
+        let port = bluetooth_port("/dev/rfcomm0");
+        let rendered = render_port_line(&port);
+
+        assert!(!is_plausible_recovery_port(&port));
+        assert!(rendered.contains("[ignored]"));
+        assert!(rendered.contains("Bluetooth serial"));
+    }
+
+    #[test]
+    fn port_rendering_includes_usb_metadata() {
+        let port = usb_port("/dev/ttyUSB0", 0x1a86, 0x7523, "QinHeng", "USB Serial");
+        let rendered = render_port_line(&port);
+
+        assert!(is_plausible_recovery_port(&port));
+        assert!(rendered.contains("[plausible]"));
+        assert!(rendered.contains("VID:1a86 PID:7523"));
+        assert!(rendered.contains("manufacturer=QinHeng"));
+        assert!(rendered.contains("product=USB Serial"));
+    }
+
+    #[test]
+    fn linux_sysfs_paths_are_normalized_to_dev_nodes() {
+        assert_eq!(normalize_port_name("/sys/class/tty/ttyS4"), "/dev/ttyS4");
+        assert_eq!(
+            normalize_port_name("/sys/class/tty/ttyUSB0"),
+            "/dev/ttyUSB0"
+        );
+    }
+
+    #[test]
     fn flash_plan_builder_applies_cli_overrides() {
         let plan = parse_recover(
             &[
@@ -1888,6 +2090,39 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("cannot flush"))
+        }
+    }
+
+    fn usb_port(
+        port_name: &str,
+        vid: u16,
+        pid: u16,
+        manufacturer: &str,
+        product: &str,
+    ) -> SerialPortInfo {
+        SerialPortInfo {
+            port_name: String::from(port_name),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid,
+                pid,
+                serial_number: Some(String::from("SER123")),
+                manufacturer: Some(String::from(manufacturer)),
+                product: Some(String::from(product)),
+            }),
+        }
+    }
+
+    fn bluetooth_port(port_name: &str) -> SerialPortInfo {
+        SerialPortInfo {
+            port_name: String::from(port_name),
+            port_type: SerialPortType::BluetoothPort,
+        }
+    }
+
+    fn unknown_port(port_name: &str) -> SerialPortInfo {
+        SerialPortInfo {
+            port_name: String::from(port_name),
+            port_type: SerialPortType::Unknown,
         }
     }
 }
