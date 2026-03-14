@@ -414,19 +414,33 @@ impl FixtureRecoveryScenario {
 
     #[allow(clippy::too_many_lines)]
     fn flash_script(&self) -> Vec<LabeledStep> {
-        let preloader_packet = build_crc_packet(1, &self.preloader);
-        let fip_packet = build_crc_packet(1, &self.fip);
+        let mut script = Self::flash_preamble();
+        script.extend(self.flash_preloader_transfer());
+        script.extend(self.flash_fip_transfer());
+        script.extend(Self::flash_reset_sequence());
+        script
+    }
 
+    fn flash_preamble() -> Vec<LabeledStep> {
         vec![
-            LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(
+                ReplayPoint::FlashWakePrompt,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
             LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::Write(vec![b'\r'])),
             LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::Flush),
-            LabeledStep::new(ReplayPoint::FlashWakePrompt, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(
+                ReplayPoint::FlashWakePrompt,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
             LabeledStep::new(
                 ReplayPoint::FlashWakePrompt,
                 MockStep::Read(b"\r\nAN7581> ".to_vec()),
             ),
-            LabeledStep::new(ReplayPoint::LoadaddrOutput, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+            LabeledStep::new(
+                ReplayPoint::LoadaddrOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
             LabeledStep::new(
                 ReplayPoint::LoadaddrOutput,
                 MockStep::Write(b"printenv loadaddr\n".to_vec()),
@@ -435,9 +449,13 @@ impl FixtureRecoveryScenario {
             LabeledStep::new(
                 ReplayPoint::LoadaddrOutput,
                 MockStep::Read(
-                b"AN7581> printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> ".to_vec(),
-            )),
-            LabeledStep::new(ReplayPoint::EraseOutput, MockStep::SetTimeout(COMMAND_TIMEOUT)),
+                    b"AN7581> printenv loadaddr\r\nloadaddr=0x81800000\r\nAN7581> ".to_vec(),
+                ),
+            ),
+            LabeledStep::new(
+                ReplayPoint::EraseOutput,
+                MockStep::SetTimeout(COMMAND_TIMEOUT),
+            ),
             LabeledStep::new(
                 ReplayPoint::EraseOutput,
                 MockStep::Write(b"mmc erase 0x0 0x800\n".to_vec()),
@@ -446,8 +464,16 @@ impl FixtureRecoveryScenario {
             LabeledStep::new(
                 ReplayPoint::EraseOutput,
                 MockStep::Read(
-                b"AN7581> mmc erase 0x0 0x800\r\n2048 blocks erased: OK\r\nAN7581> ".to_vec(),
-            )),
+                    b"AN7581> mmc erase 0x0 0x800\r\n2048 blocks erased: OK\r\nAN7581> ".to_vec(),
+                ),
+            ),
+        ]
+    }
+
+    fn flash_preloader_transfer(&self) -> Vec<LabeledStep> {
+        let preloader_packet = build_crc_packet(1, &self.preloader);
+
+        vec![
             LabeledStep::new(
                 ReplayPoint::LoadxPreloaderCrc,
                 MockStep::SetTimeout(COMMAND_TIMEOUT),
@@ -516,9 +542,17 @@ impl FixtureRecoveryScenario {
             LabeledStep::new(
                 ReplayPoint::MmcWritePreloaderOutput,
                 MockStep::Read(
-                b"AN7581> mmc write $loadaddr 0x4 0xfc\r\n252 blocks written: OK\r\nAN7581> "
-                    .to_vec(),
-            )),
+                    b"AN7581> mmc write $loadaddr 0x4 0xfc\r\n252 blocks written: OK\r\nAN7581> "
+                        .to_vec(),
+                ),
+            ),
+        ]
+    }
+
+    fn flash_fip_transfer(&self) -> Vec<LabeledStep> {
+        let fip_packet = build_crc_packet(1, &self.fip);
+
+        vec![
             LabeledStep::new(
                 ReplayPoint::LoadxFipCrc,
                 MockStep::SetTimeout(COMMAND_TIMEOUT),
@@ -567,7 +601,9 @@ impl FixtureRecoveryScenario {
             LabeledStep::new(ReplayPoint::FilesizeFipOutput, MockStep::Flush),
             LabeledStep::new(
                 ReplayPoint::FilesizeFipOutput,
-                MockStep::Read(b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec()),
+                MockStep::Read(
+                    b"AN7581> printenv filesize\r\nfilesize=0x4\r\nAN7581> ".to_vec(),
+                ),
             ),
             LabeledStep::new(
                 ReplayPoint::MmcWriteFipOutput,
@@ -581,21 +617,34 @@ impl FixtureRecoveryScenario {
             LabeledStep::new(
                 ReplayPoint::MmcWriteFipOutput,
                 MockStep::Read(
-                b"AN7581> mmc write $loadaddr 0x100 0x700\r\n1792 blocks written: OK\r\nAN7581> "
-                    .to_vec(),
-            )),
-            LabeledStep::new(ReplayPoint::ResetOutput, MockStep::SetTimeout(RESET_TIMEOUT)),
-            LabeledStep::new(ReplayPoint::ResetOutput, MockStep::Write(b"reset\n".to_vec())),
+                    b"AN7581> mmc write $loadaddr 0x100 0x700\r\n1792 blocks written: OK\r\nAN7581> "
+                        .to_vec(),
+                ),
+            ),
+        ]
+    }
+
+    fn flash_reset_sequence() -> Vec<LabeledStep> {
+        vec![
+            LabeledStep::new(
+                ReplayPoint::ResetOutput,
+                MockStep::SetTimeout(RESET_TIMEOUT),
+            ),
+            LabeledStep::new(
+                ReplayPoint::ResetOutput,
+                MockStep::Write(b"reset\n".to_vec()),
+            ),
             LabeledStep::new(ReplayPoint::ResetOutput, MockStep::Flush),
             LabeledStep::new(
                 ReplayPoint::ResetOutput,
                 MockStep::Read(
-                fs::read(
-                    Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../tests/fixtures/an7581/reset-evidence.bin"),
-                )
-                .expect("reset fixture must load"),
-            )),
+                    fs::read(
+                        Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../tests/fixtures/an7581/reset-evidence.bin"),
+                    )
+                    .expect("reset fixture must load"),
+                ),
+            ),
         ]
     }
 }
