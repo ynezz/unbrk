@@ -5,6 +5,7 @@ use clap::{
 use clap_complete::Shell;
 use clap_complete::generate;
 use clap_mangen::Man;
+use console::{Emoji, Style};
 use crossterm::event::{
     self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
@@ -1290,7 +1291,7 @@ impl FancyProgressRenderer {
         self.bar.set_length(total_bytes);
         self.bar.set_position(0);
         self.bar
-            .set_message(transfer_message(stage, 0, total_bytes, Duration::ZERO));
+            .set_message(format!("Uploading {}", transfer_stage_label(stage)));
         self.bar.tick();
     }
 
@@ -1298,12 +1299,8 @@ impl FancyProgressRenderer {
         self.bar.set_style(fancy_transfer_style());
         self.bar.set_length(total_bytes);
         self.bar.set_position(bytes_sent);
-        self.bar.set_message(transfer_message(
-            stage,
-            bytes_sent,
-            total_bytes,
-            self.bar.elapsed(),
-        ));
+        self.bar
+            .set_message(format!("Uploading {}", transfer_stage_label(stage)));
         self.bar.tick();
     }
 
@@ -1327,8 +1324,10 @@ fn fancy_spinner_style() -> ProgressStyle {
 }
 
 fn fancy_transfer_style() -> ProgressStyle {
-    ProgressStyle::with_template("{spinner:.green} {msg}\n{wide_bar:.cyan/blue}")
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
+    ProgressStyle::with_template(
+        "{spinner:.green} {msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar())
 }
 
 const fn stage_label(stage: TransferStage) -> &'static str {
@@ -1348,6 +1347,7 @@ const fn prompt_waiting_label(stage: RecoveryStage) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn transfer_message(
     stage: TransferStage,
     bytes_sent: u64,
@@ -1405,7 +1405,8 @@ impl<'a> ProgressReporter<'a> {
     }
 
     fn write_startup_banner(&mut self, plan: &RecoverPlan, port: &str, target: &TargetProfile) {
-        let lines = recover_startup_banner(plan, port, target);
+        let fancy = matches!(self.mode, ProgressReporterMode::Fancy(_));
+        let lines = recover_startup_banner(plan, port, target, fancy);
         match &self.mode {
             ProgressReporterMode::Off => {}
             ProgressReporterMode::Fancy(renderer) => {
@@ -1606,7 +1607,109 @@ impl PlainProgressRenderer {
     }
 }
 
-fn recover_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile) -> Vec<String> {
+// Emoji with graceful fallback on terminals that don't support Unicode.
+static EMOJI_WRENCH: Emoji<'_, '_> = Emoji("🔧 ", "");
+static EMOJI_PACKAGE: Emoji<'_, '_> = Emoji("📦 ", "");
+static EMOJI_HOURGLASS: Emoji<'_, '_> = Emoji("⏳ ", "");
+static EMOJI_TIMER: Emoji<'_, '_> = Emoji("⏱  ", "");
+static EMOJI_MONITOR: Emoji<'_, '_> = Emoji("🖥  ", "");
+static EMOJI_RESUME: Emoji<'_, '_> = Emoji("🔄 ", "");
+
+/// Build a styled label for the startup banner (bold cyan, right-aligned).
+fn banner_label(text: &str) -> String {
+    let label = Style::new().bold().cyan().for_stderr().apply_to(text);
+    format!("{label:>12}")
+}
+
+fn recover_startup_banner(
+    plan: &RecoverPlan,
+    port: &str,
+    target: &TargetProfile,
+    fancy: bool,
+) -> Vec<String> {
+    if fancy {
+        fancy_startup_banner(plan, port, target)
+    } else {
+        plain_startup_banner(plan, port, target)
+    }
+}
+
+fn fancy_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}{} {port} \u{00b7} {} \u{00b7} {} baud",
+        EMOJI_WRENCH,
+        banner_label("Recovery"),
+        target.name,
+        plan.args.baud,
+    )];
+
+    if plan.args.resume_from_uboot {
+        lines.push(format!(
+            "{}{} resume from existing U-Boot prompt",
+            EMOJI_RESUME,
+            banner_label("Mode"),
+        ));
+    } else {
+        lines.push(format!(
+            "{}{} {}",
+            EMOJI_PACKAGE,
+            banner_label("Preloader"),
+            display_optional_path(plan.args.preloader.as_deref()),
+        ));
+        lines.push(format!(
+            "{}{} {}",
+            EMOJI_PACKAGE,
+            banner_label("FIP"),
+            display_optional_path(plan.args.fip.as_deref()),
+        ));
+        let action_hint = Style::new()
+            .yellow()
+            .for_stderr()
+            .apply_to("power-cycle board into recovery mode");
+        lines.push(format!(
+            "{}{} recovery prompt \u{2014} {action_hint}",
+            EMOJI_HOURGLASS,
+            banner_label("Waiting"),
+        ));
+    }
+
+    lines.push(format!(
+        "{}{} prompt {} \u{00b7} packet {} \u{00b7} command {} \u{00b7} reset {}",
+        EMOJI_TIMER,
+        banner_label("Timeouts"),
+        HumanDuration(duration_override(
+            plan.args.prompt_timeout,
+            DEFAULT_PROMPT_TIMEOUT
+        )),
+        HumanDuration(duration_override(
+            plan.args.packet_timeout,
+            XMODEM_DEFAULT_PACKET_TIMEOUT
+        )),
+        HumanDuration(duration_override(
+            plan.args.command_timeout,
+            DEFAULT_COMMAND_TIMEOUT
+        )),
+        HumanDuration(duration_override(
+            plan.args.reset_timeout,
+            DEFAULT_RESET_TIMEOUT
+        )),
+    ));
+
+    let handoff_value = if plan.console_handoff_allowed {
+        "interactive after recovery"
+    } else {
+        "disabled; stop at U-Boot"
+    };
+    lines.push(format!(
+        "{}{} {handoff_value}",
+        EMOJI_MONITOR,
+        banner_label("Console"),
+    ));
+
+    lines
+}
+
+fn plain_startup_banner(plan: &RecoverPlan, port: &str, target: &TargetProfile) -> Vec<String> {
     let mut lines = vec![format!(
         "Starting recovery on {port} at {} baud for target {}.",
         plan.args.baud, target.name
@@ -2788,7 +2891,7 @@ mod tests {
                 size_bytes: 1024,
             },
         ));
-        assert!(renderer.bar.message().contains("Uploading preloader"));
+        assert!(renderer.bar.message().contains("Uploading Preloader"));
 
         renderer.observe(&fixture_event(
             3,
@@ -2799,7 +2902,7 @@ mod tests {
                 total_bytes: 1024,
             },
         ));
-        assert!(renderer.bar.message().contains("512 B"));
+        assert!(renderer.bar.message().contains("Uploading Preloader"));
 
         renderer.observe(&fixture_event(
             4,
