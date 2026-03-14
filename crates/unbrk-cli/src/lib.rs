@@ -57,8 +57,11 @@ const CONSOLE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(25);
 #[must_use]
 pub fn run() -> ExitCode {
     let terminal_status = TerminalStatus::detect();
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
+    // Do not hold process-wide stdio locks across the whole command. The fancy
+    // progress renderer writes through indicatif's own stdout/stderr handles, so
+    // long-lived locks suppress the progress UI entirely.
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
 
     match try_run(
         std::env::args_os(),
