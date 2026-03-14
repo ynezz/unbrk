@@ -76,6 +76,28 @@ unbrk recover \
   --json
 ```
 
+## Build From Source
+
+The repository pins Rust `1.93.1` in
+[`rust-toolchain.toml`](rust-toolchain.toml), so a current `rustup` install is
+enough to pick up the expected toolchain automatically.
+
+Build the release CLI locally with Cargo:
+
+```bash
+cargo build --release -p unbrk-cli
+```
+
+The compiled binary will be available at `target/release/unbrk`.
+
+If you use [`just`](justfile), the repo also exposes the shared developer
+targets:
+
+```bash
+just dist
+just ci
+```
+
 ## Operator Guidance
 
 - Start `recover` first, then perform exactly one controlled reset while it is
