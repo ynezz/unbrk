@@ -976,7 +976,10 @@ impl From<clap::Error> for RunError {
 impl From<UnbrkError> for RunError {
     fn from(error: UnbrkError) -> Self {
         match error {
-            UnbrkError::Serial { source, .. } => Self::Serial(source),
+            UnbrkError::Serial { operation, source } => Self::Serial(io::Error::new(
+                source.kind(),
+                format!("serial I/O failed while {operation}: {source}"),
+            )),
             UnbrkError::Timeout { .. } => Self::Timeout(error.to_string()),
             UnbrkError::PromptMismatch { .. } | UnbrkError::Protocol { .. } => {
                 Self::Protocol(error.to_string())
@@ -1078,6 +1081,7 @@ mod tests {
     };
     use std::io::{self, Write};
     use std::time::Duration;
+    use unbrk_core::error::UnbrkError;
     use unbrk_core::event::{Event, EventPayload, RecoveryStage};
     use unbrk_core::target::{
         AN7581, BlockCount, BlockOffset, BlockRange, FlashLayout, PromptPattern, TargetProfile,
@@ -1510,6 +1514,27 @@ mod tests {
             RunError::UserAbort(String::from("ctrl-c")).exit_code(),
             CliExitCode::UserAbort
         );
+    }
+
+    #[test]
+    fn serial_error_conversion_preserves_operation_context() {
+        let error = RunError::from(UnbrkError::Serial {
+            operation: "writing the loadx command",
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+        });
+
+        match error {
+            RunError::Serial(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("serial I/O failed while writing the loadx command")
+                );
+                assert!(error.to_string().contains("permission denied"));
+            }
+            other => panic!("expected a serial run error, got {other:?}"),
+        }
     }
 
     #[test]
