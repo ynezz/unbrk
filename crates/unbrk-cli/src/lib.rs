@@ -481,54 +481,65 @@ fn build_flash_plan(args: &RecoverArgs, target: TargetProfile) -> Result<FlashPl
     let preloader_path = required_image_path(args.preloader.as_ref(), "--preloader")?;
     let fip_path = required_image_path(args.fip.as_ref(), "--fip")?;
     let defaults = target.flash;
+    let erase_start_block = defaults.erase_range.start_block;
+    let erase_block_count = BlockCount::new(
+        args.erase_block_count
+            .map(u32::try_from)
+            .transpose()
+            .map_err(block_value_error("--erase-block-count"))?
+            .unwrap_or_else(|| defaults.erase_range.block_count.get()),
+    );
+    let preloader_start_block = BlockOffset::new(
+        args.preloader_start_block
+            .map(u32::try_from)
+            .transpose()
+            .map_err(block_value_error("--preloader-start-block"))?
+            .unwrap_or_else(|| defaults.preloader.start_block.get()),
+    );
+    let preloader_block_count = BlockCount::new(
+        args.preloader_block_count
+            .map(u32::try_from)
+            .transpose()
+            .map_err(block_value_error("--preloader-block-count"))?
+            .unwrap_or_else(|| defaults.preloader.block_count.get()),
+    );
+    let fip_start_block = BlockOffset::new(
+        args.fip_start_block
+            .map(u32::try_from)
+            .transpose()
+            .map_err(block_value_error("--fip-start-block"))?
+            .unwrap_or_else(|| defaults.fip.start_block.get()),
+    );
+    let fip_block_count = BlockCount::new(
+        args.fip_block_count
+            .map(u32::try_from)
+            .transpose()
+            .map_err(block_value_error("--fip-block-count"))?
+            .unwrap_or_else(|| defaults.fip.block_count.get()),
+    );
+
+    validate_block_range("the erase range", erase_start_block, erase_block_count)?;
+    validate_block_range(
+        "the preloader write range",
+        preloader_start_block,
+        preloader_block_count,
+    )?;
+    validate_block_range("the FIP write range", fip_start_block, fip_block_count)?;
 
     Ok(FlashPlan {
         block_size: defaults.block_size,
-        erase_ranges: vec![EraseRange::new(
-            defaults.erase_range.start_block,
-            BlockCount::new(
-                args.erase_block_count
-                    .map(u32::try_from)
-                    .transpose()
-                    .map_err(block_value_error("--erase-block-count"))?
-                    .unwrap_or_else(|| defaults.erase_range.block_count.get()),
-            ),
-        )],
+        erase_ranges: vec![EraseRange::new(erase_start_block, erase_block_count)],
         write_stages: vec![
             WriteStage::new(
                 ImageKind::Preloader,
-                BlockOffset::new(
-                    args.preloader_start_block
-                        .map(u32::try_from)
-                        .transpose()
-                        .map_err(block_value_error("--preloader-start-block"))?
-                        .unwrap_or_else(|| defaults.preloader.start_block.get()),
-                ),
-                BlockCount::new(
-                    args.preloader_block_count
-                        .map(u32::try_from)
-                        .transpose()
-                        .map_err(block_value_error("--preloader-block-count"))?
-                        .unwrap_or_else(|| defaults.preloader.block_count.get()),
-                ),
+                preloader_start_block,
+                preloader_block_count,
                 preloader_path.to_path_buf(),
             ),
             WriteStage::new(
                 ImageKind::Fip,
-                BlockOffset::new(
-                    args.fip_start_block
-                        .map(u32::try_from)
-                        .transpose()
-                        .map_err(block_value_error("--fip-start-block"))?
-                        .unwrap_or_else(|| defaults.fip.start_block.get()),
-                ),
-                BlockCount::new(
-                    args.fip_block_count
-                        .map(u32::try_from)
-                        .transpose()
-                        .map_err(block_value_error("--fip-block-count"))?
-                        .unwrap_or_else(|| defaults.fip.block_count.get()),
-                ),
+                fip_start_block,
+                fip_block_count,
                 fip_path.to_path_buf(),
             ),
         ],
@@ -541,6 +552,20 @@ fn block_value_error(flag: &'static str) -> impl FnOnce(std::num::TryFromIntErro
             "{flag} does not fit in a 32-bit MMC block value",
         )))
     }
+}
+
+fn validate_block_range(
+    description: &'static str,
+    start_block: BlockOffset,
+    block_count: BlockCount,
+) -> Result<(), RunError> {
+    if start_block.get().checked_add(block_count.get()).is_none() {
+        return Err(RunError::Input(InputError::new(format!(
+            "{description} exceeds the 32-bit MMC block address space",
+        ))));
+    }
+
+    Ok(())
 }
 
 fn wait_for_uboot_prompt(
@@ -1595,6 +1620,39 @@ mod tests {
             flash_plan.write_stages[1].block_count,
             BlockCount::new(0x710)
         );
+    }
+
+    #[test]
+    fn flash_plan_builder_rejects_overflowing_block_ranges() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--flash-persistent",
+                "--preloader-start-block",
+                "0xffffffff",
+                "--preloader-block-count",
+                "2",
+            ],
+            tty_status(false),
+        );
+
+        let error = build_flash_plan(&plan.args, target_profile(&plan.args)).unwrap_err();
+
+        match error {
+            RunError::Input(error) => {
+                assert!(error.to_string().contains(
+                    "the preloader write range exceeds the 32-bit MMC block address space"
+                ));
+            }
+            other => panic!("expected an input error, got {other:?}"),
+        }
     }
 
     #[test]
