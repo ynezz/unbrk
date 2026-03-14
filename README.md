@@ -15,12 +15,46 @@ The current macOS and Windows portability claims come from the
 clippy, nextest, and doc-test suite. They do not imply real-device UART
 recovery has been validated on either host yet.
 
-## Quick Start
+## Installation
 
-Recovery to the temporary RAM-resident `AN7581>` prompt:
+`unbrk` is distributed through GitHub Releases, not crates.io.
+
+- Download the archive that matches your host from the
+  [Releases](https://github.com/ynezz/unbrk/releases) page.
+- Linux and macOS releases ship as `.tar.gz` archives.
+- Windows releases ship as `.zip` archives.
+- Shell and PowerShell installer scripts are attached to each tagged release.
+
+`cargo install` is intentionally not supported yet. The CLI contract is still
+settling, so public installation stays tied to signed release artifacts instead
+of crates.io.
+
+Before using a release artifact, verify both integrity and provenance:
 
 ```bash
-cargo run -p unbrk-cli -- recover \
+sha256sum -c unbrk-vX.Y.Z.sha256
+gh attestation verify ./unbrk-cli-x86_64-unknown-linux-gnu.tar.gz \
+  -R ynezz/unbrk
+```
+
+## Quick Start
+
+Human-driven recovery to the temporary RAM-resident `AN7581>` prompt, with
+live progress output and an interactive console handoff at the end:
+
+```bash
+unbrk recover \
+  --port /dev/ttyS4 \
+  --preloader /path/to/prplos-airoha-an7581-nokia_valyrian-preloader.bin \
+  --fip /path/to/prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip \
+  --prompt-timeout 120
+```
+
+Machine-driven recovery that stops at U-Boot and emits newline-delimited JSON
+events instead of a live console:
+
+```bash
+unbrk recover \
   --port /dev/ttyS4 \
   --preloader /path/to/prplos-airoha-an7581-nokia_valyrian-preloader.bin \
   --fip /path/to/prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip \
@@ -32,7 +66,7 @@ cargo run -p unbrk-cli -- recover \
 Persistent flash from an already-live U-Boot prompt:
 
 ```bash
-cargo run -p unbrk-cli -- recover \
+unbrk recover \
   --port /dev/ttyS4 \
   --preloader /path/to/prplos-airoha-an7581-nokia_valyrian-preloader.bin \
   --fip /path/to/prplos-airoha-an7581-nokia_valyrian-bl31-uboot.fip \
@@ -54,6 +88,44 @@ cargo run -p unbrk-cli -- recover \
   `AN7581>` as normal boot chatter, not as protocol failure.
 - If `prompt-timeout` expires before any prompt appears, restart from a clean
   power-off state and re-check the port, cabling, and recovery-mode timing.
+
+## Exit Codes
+
+`unbrk recover` uses stable exit codes:
+
+- `0`: success
+- `1`: I/O error
+- `2`: timeout
+- `3`: protocol error
+- `4`: XMODEM failure
+- `5`: U-Boot command failure
+- `6`: verification mismatch
+- `7`: bad input
+- `8`: user abort
+
+## JSON Event Stream
+
+`--json` emits newline-delimited JSON events. The opening `session_started`
+event declares `schema_version`, which is currently `1`, so automation can
+reject incompatible streams explicitly.
+
+The stable event kinds are:
+
+- `session_started`
+- `port_opened`
+- `prompt_seen`
+- `input_sent`
+- `crc_ready`
+- `xmodem_started`
+- `xmodem_progress`
+- `xmodem_completed`
+- `uboot_prompt_seen`
+- `uboot_command_started`
+- `uboot_command_completed`
+- `image_verified`
+- `reset_seen`
+- `handoff_ready`
+- `failure`
 
 ## Reference Docs
 
