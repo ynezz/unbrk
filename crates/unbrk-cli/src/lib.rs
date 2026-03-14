@@ -1161,10 +1161,25 @@ impl FancyProgressRenderer {
                 elapsed_secs,
                 timeout_secs,
             } => {
-                self.set_waiting(format!(
-                    "Waiting for {}... ({elapsed_secs}s/{timeout_secs}s)",
-                    prompt_waiting_label(*stage)
-                ));
+                // Alternate between the countdown and the power-cycle
+                // instruction so the user sees both without either being
+                // permanently hidden. Only the initial prompt stages need
+                // the hint; later stages just show the countdown.
+                let show_hint = matches!(
+                    stage,
+                    RecoveryStage::Bootrom | RecoveryStage::PreloaderPrompt
+                ) && elapsed_secs % 4 >= 2;
+
+                if show_hint {
+                    self.set_waiting(
+                        "Waiting for recovery prompt (power-cycle the board into recovery mode)",
+                    );
+                } else {
+                    self.set_waiting(format!(
+                        "Waiting for {}... ({elapsed_secs}s/{timeout_secs}s)",
+                        prompt_waiting_label(*stage)
+                    ));
+                }
             }
             EventPayload::PromptSeen {
                 stage: RecoveryStage::PreloaderPrompt,
