@@ -138,3 +138,20 @@ fn harness_supports_targeted_failure_injection() {
         other => panic!("expected a timeout from the injected replay failure, got {other:?}"),
     }
 }
+
+#[test]
+fn harness_does_not_depend_on_ack_bytes_leaking_from_crc_fixtures() {
+    let scenario = FixtureRecoveryScenario::an7581_happy_path().unwrap();
+    let run = scenario
+        .run_with_overrides([
+            (ReplayPoint::PreloaderCrc, MockStep::Read(b"CCC".to_vec())),
+            (ReplayPoint::FipCrc, MockStep::Read(b"CCC".to_vec())),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        run.report.states.as_slice(),
+        FixtureRecoveryScenario::expected_states()
+    );
+    run.transport.assert_finished();
+}

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use unbrk_core::error::UnbrkError;
 use unbrk_core::target::AN7581;
-use unbrk_core::xmodem::{XMODEM_EOT, XmodemConfig, build_crc_packet};
+use unbrk_core::xmodem::{
+    XMODEM_ACK, XMODEM_CRC_READY_MIN_BYTES, XMODEM_EOT, XmodemConfig, build_crc_packet,
+};
 use unbrk_core::{
     MockStep, MockTransport, RecoveryConfig, RecoveryImages, RecoveryReport, RecoveryState,
     recover_to_uboot,
@@ -66,10 +68,12 @@ impl RecoveryFixtures {
     fn load() -> io::Result<Self> {
         Ok(Self {
             initial_prompt: Self::read("happy-path-stage1-prompt.bin")?,
-            preloader_crc: Self::read("happy-path-stage1-crc-readiness.bin")?,
+            preloader_crc: Self::trim_crc_ready(&Self::read(
+                "happy-path-stage1-crc-readiness.bin",
+            )?)?,
             interstage_chatter: Self::read("happy-path-interstage-chatter.bin")?,
             fip_prompt: Self::read("happy-path-stage2-prompt.bin")?,
-            fip_crc: Self::read("happy-path-stage2-crc-readiness.bin")?,
+            fip_crc: Self::trim_crc_ready(&Self::read("happy-path-stage2-crc-readiness.bin")?)?,
             uboot_boot_noise: Self::read("happy-path-uboot-boot-noise.bin")?,
             uboot_prompts: Self::read("happy-path-uboot-prompts.bin")?,
         })
@@ -97,6 +101,18 @@ impl RecoveryFixtures {
 
     fn read(file_name: &str) -> io::Result<Vec<u8>> {
         fs::read(Self::root().join(file_name))
+    }
+
+    fn trim_crc_ready(bytes: &[u8]) -> io::Result<Vec<u8>> {
+        let ready_len = bytes.iter().take_while(|&&byte| byte == b'C').count();
+        if ready_len < usize::try_from(XMODEM_CRC_READY_MIN_BYTES).unwrap_or(usize::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CRC readiness fixture must start with a leading C burst",
+            ));
+        }
+
+        Ok(bytes[..ready_len].to_vec())
     }
 
     fn root() -> PathBuf {
@@ -213,8 +229,10 @@ impl FixtureRecoveryScenario {
             ),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Write(preloader_packet)),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Flush),
+            LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Read(vec![XMODEM_ACK])),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Write(vec![XMODEM_EOT])),
             LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Flush),
+            LabeledStep::new(ReplayPoint::PreloaderCrc, MockStep::Read(vec![XMODEM_ACK])),
             LabeledStep::new(
                 ReplayPoint::InterstageChatter,
                 MockStep::SetTimeout(self.prompt_timeout),
@@ -239,8 +257,10 @@ impl FixtureRecoveryScenario {
             ),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Write(fip_packet)),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Flush),
+            LabeledStep::new(ReplayPoint::FipCrc, MockStep::Read(vec![XMODEM_ACK])),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Write(vec![XMODEM_EOT])),
             LabeledStep::new(ReplayPoint::FipCrc, MockStep::Flush),
+            LabeledStep::new(ReplayPoint::FipCrc, MockStep::Read(vec![XMODEM_ACK])),
             LabeledStep::new(
                 ReplayPoint::UbootBootNoise,
                 MockStep::SetTimeout(self.prompt_timeout),
