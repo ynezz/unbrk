@@ -3,12 +3,35 @@ use clap::{
     parser::ValueSource,
 };
 use clap_complete::Shell;
+use clap_complete::generate;
+use clap_mangen::Man;
 use is_terminal::IsTerminal;
 use regex::Regex;
 use std::ffi::OsString;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
+use unbrk_core::error::{ConsoleTail, UnbrkError};
+use unbrk_core::event::{
+    EVENT_SCHEMA_VERSION, Event, EventPayload, FailureClass, ImageKind, RecoveryStage,
+};
+use unbrk_core::flash::{DEFAULT_RESET_TIMEOUT, FlashConfig, flash_from_uboot};
+use unbrk_core::prompt::advance_to_prompt_allowing_trailing_space;
+use unbrk_core::recovery::{
+    DEFAULT_PROMPT_TIMEOUT, RecoveryConfig, RecoveryImages, recover_to_uboot,
+};
+use unbrk_core::target::{
+    AN7581, BlockCount, BlockOffset, EraseRange, FlashPlan, PromptPattern, PromptPatterns,
+    TargetProfile, WriteStage,
+};
+use unbrk_core::transport::{SerialTransport, TranscriptTransport, Transport};
+use unbrk_core::uboot::DEFAULT_COMMAND_TIMEOUT;
+use unbrk_core::xmodem::{
+    XMODEM_DEFAULT_BLOCK_RETRY_LIMIT, XMODEM_DEFAULT_EOT_RETRY_LIMIT,
+    XMODEM_DEFAULT_PACKET_TIMEOUT, XmodemConfig,
+};
 
 const EXIT_CODES_HELP: &str = "\
 Exit codes:
@@ -42,6 +65,11 @@ pub fn run() -> ExitCode {
     }
 }
 
+#[must_use]
+pub fn cli_command() -> clap::Command {
+    Cli::command()
+}
+
 fn try_run<I, T>(
     args: I,
     terminal_status: TerminalStatus,
@@ -61,7 +89,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let matches = Cli::command()
+    let matches = cli_command()
         .try_get_matches_from(args)
         .map_err(RunError::from)?;
     let cli = Cli::from_arg_matches(&matches)
@@ -188,19 +216,14 @@ fn dispatch(
             Ok(())
         }
         CommandPlan::Completions { shell } => {
-            writeln!(
-                stdout,
-                "completions command scaffold: generation is not implemented yet for {shell}.",
-            )
-            .map_err(RunError::Serial)?;
+            let mut command = cli_command();
+            generate(shell, &mut command, "unbrk", stdout);
             Ok(())
         }
         CommandPlan::Man => {
-            writeln!(
-                stdout,
-                "man command scaffold: generation is not implemented yet."
-            )
-            .map_err(RunError::Serial)?;
+            Man::new(cli_command())
+                .render(stdout)
+                .map_err(RunError::Serial)?;
             Ok(())
         }
         CommandPlan::Doctor => {
@@ -227,42 +250,442 @@ fn run_recover(
         .map_err(RunError::Serial)?;
     }
 
-    if plan.args.json {
-        writeln!(
-            stdout,
-            concat!(
-                "{{",
-                "\"schema_version\":1,",
-                "\"event\":\"cli_scaffold\",",
-                "\"command\":\"recover\",",
-                "\"progress_mode\":\"{}\",",
-                "\"no_console\":{},",
-                "\"console_handoff_allowed\":{}",
-                "}}"
-            ),
-            plan.progress_mode.as_str(),
-            plan.no_console,
-            plan.console_handoff_allowed,
-        )
-        .map_err(RunError::Serial)?;
-    } else {
-        writeln!(
-            stdout,
-            "recover command scaffold: orchestration is not implemented yet.",
-        )
-        .map_err(RunError::Serial)?;
-        writeln!(
-            stdout,
-            "resolved progress mode: {} | console handoff: {} | stdout tty: {}",
-            plan.progress_mode.as_str(),
-            if plan.console_handoff_allowed {
-                "enabled"
-            } else {
-                "disabled"
+    let port = recover_port(&plan.args)?;
+    let target = target_profile(&plan.args);
+    let mut events = Vec::new();
+    push_event(
+        &mut events,
+        EventPayload::SessionStarted {
+            schema_version: EVENT_SCHEMA_VERSION,
+            tool_version: String::from(env!("CARGO_PKG_VERSION")),
+            target_profile: String::from(target.name),
+            serial_port: Some(port.clone()),
+        },
+    );
+
+    let mut transport = open_transport(port.as_str(), &plan.args)?;
+    push_event(
+        &mut events,
+        EventPayload::PortOpened {
+            port: port.clone(),
+            baud: plan.args.baud,
+        },
+    );
+
+    let execution = execute_recover(plan, target, &mut transport, &mut events);
+    if let Err(error) = &execution {
+        push_event(
+            &mut events,
+            EventPayload::Failure {
+                class: error.failure_class(),
+                message: error.to_string(),
             },
-            plan.terminal_status.stdout_is_tty,
-        )
+        );
+    }
+
+    if let Some(path) = plan.args.log_file.as_deref() {
+        write_events_to_path(path, &events)?;
+    }
+
+    if plan.args.json {
+        write_events(stdout, &events)?;
+    } else if let Ok(outcome) = &execution {
+        write_recover_summary(stdout, plan, port.as_str(), outcome)?;
+    }
+
+    execution.map(|_| ())
+}
+
+type CliTransport = TranscriptTransport<SerialTransport, Box<dyn Write>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecoverOutcome {
+    Recovered,
+    FlashedAfterRecovery { reset_evidence: String },
+    FlashedFromExistingPrompt { reset_evidence: String },
+}
+
+fn recover_port(args: &RecoverArgs) -> Result<String, RunError> {
+    args.port.clone().ok_or_else(|| {
+        RunError::Input(InputError::new(
+            "automatic port selection is not implemented yet; pass --port explicitly",
+        ))
+    })
+}
+
+fn open_transport(port: &str, args: &RecoverArgs) -> Result<CliTransport, RunError> {
+    let initial_timeout = duration_override(args.prompt_timeout, DEFAULT_PROMPT_TIMEOUT);
+    let serial = SerialTransport::open(port.to_owned(), args.baud, initial_timeout)
         .map_err(RunError::Serial)?;
+    let transcript: Box<dyn Write> = match args.transcript_file.as_deref() {
+        Some(path) => Box::new(BufWriter::new(File::create(path).map_err(|error| {
+            RunError::Input(InputError::new(format!(
+                "failed to create transcript file {}: {error}",
+                path.display()
+            )))
+        })?)),
+        None => Box::new(io::sink()),
+    };
+
+    Ok(TranscriptTransport::new(serial, transcript))
+}
+
+fn execute_recover(
+    plan: &RecoverPlan,
+    target: TargetProfile,
+    transport: &mut CliTransport,
+    events: &mut Vec<Event>,
+) -> Result<RecoverOutcome, RunError> {
+    let recovery_config = RecoveryConfig::new(
+        duration_override(plan.args.prompt_timeout, DEFAULT_PROMPT_TIMEOUT),
+        xmodem_config(&plan.args),
+    );
+    let flash_config = FlashConfig::new(
+        duration_override(plan.args.command_timeout, DEFAULT_COMMAND_TIMEOUT),
+        duration_override(plan.args.reset_timeout, DEFAULT_RESET_TIMEOUT),
+        xmodem_config(&plan.args),
+    );
+
+    if plan.args.resume_from_uboot {
+        if plan.args.flash_persistent {
+            let flash_plan = build_flash_plan(&plan.args, target)?;
+            let flash_report = flash_from_uboot(transport, target, &flash_plan, flash_config)
+                .map_err(RunError::from)?;
+            append_events(events, flash_report.events);
+            return Ok(RecoverOutcome::FlashedFromExistingPrompt {
+                reset_evidence: flash_report.reset_evidence,
+            });
+        }
+
+        let prompt = wait_for_uboot_prompt(
+            transport,
+            target.prompts.uboot,
+            duration_override(plan.args.command_timeout, DEFAULT_COMMAND_TIMEOUT),
+        )
+        .map_err(RunError::from)?;
+        push_event(events, EventPayload::UBootPromptSeen { prompt });
+        push_event(
+            events,
+            EventPayload::HandoffReady {
+                interactive_console: plan.console_handoff_allowed,
+            },
+        );
+        return Ok(RecoverOutcome::Recovered);
+    }
+
+    let preloader_path = required_image_path(plan.args.preloader.as_ref(), "--preloader")?;
+    let fip_path = required_image_path(plan.args.fip.as_ref(), "--fip")?;
+    let preloader = fs::read(preloader_path).map_err(|error| {
+        RunError::Input(InputError::new(format!(
+            "failed to read preloader image {}: {error}",
+            preloader_path.display()
+        )))
+    })?;
+    let fip = fs::read(fip_path).map_err(|error| {
+        RunError::Input(InputError::new(format!(
+            "failed to read FIP image {}: {error}",
+            fip_path.display()
+        )))
+    })?;
+    let recovery_report = recover_to_uboot(
+        transport,
+        target,
+        RecoveryImages {
+            preloader_name: file_name(preloader_path),
+            preloader: &preloader,
+            fip_name: file_name(fip_path),
+            fip: &fip,
+        },
+        recovery_config,
+    )
+    .map_err(RunError::from)?;
+    append_events(events, recovery_report.events);
+
+    if plan.args.flash_persistent {
+        let flash_plan = build_flash_plan(&plan.args, target)?;
+        let flash_report = flash_from_uboot(transport, target, &flash_plan, flash_config)
+            .map_err(RunError::from)?;
+        append_events(events, flash_report.events);
+        Ok(RecoverOutcome::FlashedAfterRecovery {
+            reset_evidence: flash_report.reset_evidence,
+        })
+    } else {
+        push_event(
+            events,
+            EventPayload::HandoffReady {
+                interactive_console: plan.console_handoff_allowed,
+            },
+        );
+        Ok(RecoverOutcome::Recovered)
+    }
+}
+
+fn xmodem_config(args: &RecoverArgs) -> XmodemConfig {
+    XmodemConfig::new(
+        duration_override(args.packet_timeout, XMODEM_DEFAULT_PACKET_TIMEOUT),
+        args.xmodem_retry
+            .unwrap_or(XMODEM_DEFAULT_BLOCK_RETRY_LIMIT),
+        args.xmodem_retry.unwrap_or(XMODEM_DEFAULT_EOT_RETRY_LIMIT),
+    )
+}
+
+fn target_profile(args: &RecoverArgs) -> TargetProfile {
+    let prompt_source = args
+        .uboot_prompt
+        .as_deref()
+        .map_or_else(|| AN7581.prompts.uboot.as_str(), leak_string);
+
+    TargetProfile {
+        serial: unbrk_core::target::SerialSettings {
+            baud_rate: args.baud,
+            ..AN7581.serial
+        },
+        prompts: PromptPatterns {
+            uboot: PromptPattern::new(prompt_source),
+            ..AN7581.prompts
+        },
+        ..AN7581
+    }
+}
+
+fn leak_string(value: &str) -> &'static str {
+    Box::leak(value.to_owned().into_boxed_str())
+}
+
+fn duration_override(override_seconds: Option<u64>, default: Duration) -> Duration {
+    override_seconds.map_or(default, Duration::from_secs)
+}
+
+fn required_image_path<'a>(
+    path: Option<&'a PathBuf>,
+    flag: &'static str,
+) -> Result<&'a Path, RunError> {
+    path.map(std::path::PathBuf::as_path).ok_or_else(|| {
+        RunError::Input(InputError::new(format!(
+            "missing required argument at execution time: {flag}",
+        )))
+    })
+}
+
+fn file_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image")
+}
+
+fn build_flash_plan(args: &RecoverArgs, target: TargetProfile) -> Result<FlashPlan, RunError> {
+    let preloader_path = required_image_path(args.preloader.as_ref(), "--preloader")?;
+    let fip_path = required_image_path(args.fip.as_ref(), "--fip")?;
+    let defaults = target.flash;
+
+    Ok(FlashPlan {
+        block_size: defaults.block_size,
+        erase_ranges: vec![EraseRange::new(
+            BlockOffset::new(0),
+            BlockCount::new(
+                args.erase_block_count
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(block_value_error("--erase-block-count"))?
+                    .unwrap_or_else(|| defaults.erase_range.block_count.get()),
+            ),
+        )],
+        write_stages: vec![
+            WriteStage::new(
+                ImageKind::Preloader,
+                BlockOffset::new(
+                    args.preloader_start_block
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(block_value_error("--preloader-start-block"))?
+                        .unwrap_or_else(|| defaults.preloader.start_block.get()),
+                ),
+                BlockCount::new(
+                    args.preloader_block_count
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(block_value_error("--preloader-block-count"))?
+                        .unwrap_or_else(|| defaults.preloader.block_count.get()),
+                ),
+                preloader_path.to_path_buf(),
+            ),
+            WriteStage::new(
+                ImageKind::Fip,
+                BlockOffset::new(
+                    args.fip_start_block
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(block_value_error("--fip-start-block"))?
+                        .unwrap_or_else(|| defaults.fip.start_block.get()),
+                ),
+                BlockCount::new(
+                    args.fip_block_count
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(block_value_error("--fip-block-count"))?
+                        .unwrap_or_else(|| defaults.fip.block_count.get()),
+                ),
+                fip_path.to_path_buf(),
+            ),
+        ],
+    })
+}
+
+fn block_value_error(flag: &'static str) -> impl FnOnce(std::num::TryFromIntError) -> RunError {
+    move |_| {
+        RunError::Input(InputError::new(format!(
+            "{flag} does not fit in a 32-bit MMC block value",
+        )))
+    }
+}
+
+fn wait_for_uboot_prompt(
+    transport: &mut impl Transport,
+    pattern: PromptPattern,
+    timeout: Duration,
+) -> Result<String, UnbrkError> {
+    transport
+        .set_timeout(timeout)
+        .map_err(|source| UnbrkError::Serial {
+            operation: "setting the U-Boot prompt timeout",
+            source,
+        })?;
+    transport
+        .write(b"\r")
+        .map_err(|source| UnbrkError::Serial {
+            operation: "writing carriage return to wake U-Boot",
+            source,
+        })?;
+    transport.flush().map_err(|source| UnbrkError::Serial {
+        operation: "flushing carriage return to wake U-Boot",
+        source,
+    })?;
+
+    let mut console = Vec::new();
+    let mut cursor = 0;
+    let mut scratch = [0_u8; 256];
+
+    loop {
+        if let Some(prompt) =
+            advance_to_prompt_allowing_trailing_space(pattern, &console, &mut cursor).map_err(
+                |error| UnbrkError::Protocol {
+                    stage: RecoveryStage::UBoot,
+                    detail: format!("invalid prompt regex: {error}"),
+                    recent_console: ConsoleTail::empty(),
+                },
+            )?
+        {
+            return Ok(prompt.prompt);
+        }
+
+        match transport.read(&mut scratch) {
+            Ok(0) => {
+                return Err(UnbrkError::Timeout {
+                    stage: RecoveryStage::UBoot,
+                    operation: "an active U-Boot prompt",
+                    timeout,
+                    recent_console: ConsoleTail::new(console),
+                });
+            }
+            Ok(read_len) => console.extend_from_slice(&scratch[..read_len]),
+            Err(source) if source.kind() == io::ErrorKind::TimedOut => {
+                return Err(UnbrkError::Timeout {
+                    stage: RecoveryStage::UBoot,
+                    operation: "an active U-Boot prompt",
+                    timeout,
+                    recent_console: ConsoleTail::new(console),
+                });
+            }
+            Err(source) => {
+                return Err(UnbrkError::Serial {
+                    operation: "reading U-Boot prompt output",
+                    source,
+                });
+            }
+        }
+    }
+}
+
+fn append_events(events: &mut Vec<Event>, appended: Vec<Event>) {
+    for event in appended {
+        push_event(events, event.payload);
+    }
+}
+
+fn push_event(events: &mut Vec<Event>, payload: EventPayload) {
+    let sequence = u64::try_from(events.len())
+        .unwrap_or(u64::MAX.saturating_sub(1))
+        .saturating_add(1);
+    events.push(
+        Event::now(sequence, payload.clone()).unwrap_or_else(|_| Event::new(sequence, 0, payload)),
+    );
+}
+
+fn write_events(writer: &mut dyn Write, events: &[Event]) -> Result<(), RunError> {
+    for event in events {
+        serde_json::to_writer(&mut *writer, event).map_err(|error| {
+            RunError::Serial(io::Error::other(format!(
+                "failed to serialize JSON event stream: {error}",
+            )))
+        })?;
+        writeln!(writer).map_err(RunError::Serial)?;
+    }
+
+    Ok(())
+}
+
+fn write_events_to_path(path: &Path, events: &[Event]) -> Result<(), RunError> {
+    let file = File::create(path).map_err(|error| {
+        RunError::Input(InputError::new(format!(
+            "failed to create log file {}: {error}",
+            path.display()
+        )))
+    })?;
+    let mut writer = BufWriter::new(file);
+    write_events(&mut writer, events)
+}
+
+fn write_recover_summary(
+    stdout: &mut dyn Write,
+    plan: &RecoverPlan,
+    port: &str,
+    outcome: &RecoverOutcome,
+) -> Result<(), RunError> {
+    writeln!(
+        stdout,
+        "recovering on {port} | progress mode: {} | no-console: {} | stdout tty: {}",
+        plan.progress_mode.as_str(),
+        plan.no_console,
+        plan.terminal_status.stdout_is_tty,
+    )
+    .map_err(RunError::Serial)?;
+
+    match outcome {
+        RecoverOutcome::Recovered => {
+            writeln!(stdout, "stopped at the RAM-resident U-Boot prompt.")
+                .map_err(RunError::Serial)?;
+            if plan.console_handoff_allowed {
+                writeln!(
+                    stdout,
+                    "interactive console handoff is not implemented yet; staying at the stop point."
+                )
+                .map_err(RunError::Serial)?;
+            }
+        }
+        RecoverOutcome::FlashedAfterRecovery { reset_evidence } => {
+            writeln!(
+                stdout,
+                "completed recovery and persistent flash; observed reset evidence: {reset_evidence}"
+            )
+            .map_err(RunError::Serial)?;
+        }
+        RecoverOutcome::FlashedFromExistingPrompt { reset_evidence } => {
+            writeln!(
+                stdout,
+                "resumed from an existing U-Boot prompt and completed the persistent flash; observed reset evidence: {reset_evidence}"
+            )
+            .map_err(RunError::Serial)?;
+        }
     }
 
     Ok(())
@@ -453,6 +876,20 @@ pub enum RunError {
 
 impl RunError {
     #[must_use]
+    pub const fn failure_class(&self) -> FailureClass {
+        match self {
+            Self::Input(_) => FailureClass::BadInput,
+            Self::Serial(_) => FailureClass::Serial,
+            Self::Timeout(_) => FailureClass::Timeout,
+            Self::Protocol(_) => FailureClass::Protocol,
+            Self::Xmodem(_) => FailureClass::Xmodem,
+            Self::UBootCommand(_) => FailureClass::UBootCommand,
+            Self::VerificationMismatch(_) => FailureClass::VerificationMismatch,
+            Self::UserAbort(_) => FailureClass::UserAbort,
+        }
+    }
+
+    #[must_use]
     pub const fn exit_code(&self) -> CliExitCode {
         match self {
             Self::Input(_) => CliExitCode::BadInput,
@@ -470,6 +907,25 @@ impl RunError {
 impl From<clap::Error> for RunError {
     fn from(error: clap::Error) -> Self {
         Self::Input(InputError::from_clap(&error))
+    }
+}
+
+impl From<UnbrkError> for RunError {
+    fn from(error: UnbrkError) -> Self {
+        match error {
+            UnbrkError::Serial { source, .. } => Self::Serial(source),
+            UnbrkError::Timeout { .. } => Self::Timeout(error.to_string()),
+            UnbrkError::PromptMismatch { .. } | UnbrkError::Protocol { .. } => {
+                Self::Protocol(error.to_string())
+            }
+            UnbrkError::Xmodem { .. } => Self::Xmodem(error.to_string()),
+            UnbrkError::UBootCommand { .. } => Self::UBootCommand(error.to_string()),
+            UnbrkError::VerificationMismatch { .. } => {
+                Self::VerificationMismatch(error.to_string())
+            }
+            UnbrkError::BadInput { .. } => Self::Input(InputError::new(error.to_string())),
+            UnbrkError::UserAbort { .. } => Self::UserAbort(error.to_string()),
+        }
     }
 }
 
@@ -553,8 +1009,9 @@ fn parse_u_boot_int(raw: &str) -> Result<u64, String> {
 mod tests {
     use super::{
         CliExitCode, CommandPlan, ProgressMode, RecoverPlan, ResolvedProgressMode, RunError,
-        TerminalStatus, parse_command,
+        TerminalStatus, build_flash_plan, parse_command, try_run,
     };
+    use unbrk_core::target::{AN7581, BlockCount, BlockOffset};
 
     const PORT: &str = "/dev/ttyUSB0";
     const PRELOADER: &str = "preloader.bin";
@@ -573,6 +1030,14 @@ mod tests {
             CommandPlan::Recover(plan) => *plan,
             command => panic!("expected recover command, got {command:?}"),
         }
+    }
+
+    fn render(args: &[&str], terminal_status: TerminalStatus) -> String {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        try_run(args, terminal_status, &mut stdout, &mut stderr).unwrap();
+        assert!(stderr.is_empty());
+        String::from_utf8(stdout).unwrap()
     }
 
     #[test]
@@ -890,6 +1355,22 @@ mod tests {
     }
 
     #[test]
+    fn completions_command_renders_shell_output() {
+        let rendered = render(&["unbrk", "completions", "bash"], tty_status(true));
+
+        assert!(rendered.contains("_unbrk"));
+        assert!(rendered.contains("complete"));
+    }
+
+    #[test]
+    fn man_command_renders_roff_output() {
+        let rendered = render(&["unbrk", "man"], tty_status(true));
+
+        assert!(rendered.contains(".TH unbrk 1"));
+        assert!(rendered.contains("UART recovery automation"));
+    }
+
+    #[test]
     fn progress_mode_auto_resolves_against_tty_state() {
         assert_eq!(
             ProgressMode::Auto.resolve(true),
@@ -898,6 +1379,75 @@ mod tests {
         assert_eq!(
             ProgressMode::Auto.resolve(false),
             ResolvedProgressMode::Plain
+        );
+    }
+
+    #[test]
+    fn recover_execution_requires_an_explicit_port_until_auto_detection_exists() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = try_run(
+            ["unbrk", "recover", "--resume-from-uboot"],
+            tty_status(false),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.exit_code(), CliExitCode::BadInput);
+        assert!(error.to_string().contains("pass --port explicitly"));
+    }
+
+    #[test]
+    fn flash_plan_builder_applies_cli_overrides() {
+        let plan = parse_recover(
+            &[
+                "unbrk",
+                "recover",
+                "--port",
+                PORT,
+                "--preloader",
+                PRELOADER,
+                "--fip",
+                FIP,
+                "--flash-persistent",
+                "--erase-block-count",
+                "0x900",
+                "--preloader-start-block",
+                "0x20",
+                "--preloader-block-count",
+                "0x40",
+                "--fip-start-block",
+                "0x120",
+                "--fip-block-count",
+                "0x710",
+            ],
+            tty_status(false),
+        );
+
+        let flash_plan = build_flash_plan(&plan.args).unwrap();
+
+        assert_eq!(flash_plan.block_size, AN7581.flash.block_size);
+        assert_eq!(flash_plan.erase_ranges[0].start_block, BlockOffset::new(0));
+        assert_eq!(
+            flash_plan.erase_ranges[0].block_count,
+            BlockCount::new(0x900)
+        );
+        assert_eq!(
+            flash_plan.write_stages[0].start_block,
+            BlockOffset::new(0x20)
+        );
+        assert_eq!(
+            flash_plan.write_stages[0].block_count,
+            BlockCount::new(0x40)
+        );
+        assert_eq!(
+            flash_plan.write_stages[1].start_block,
+            BlockOffset::new(0x120)
+        );
+        assert_eq!(
+            flash_plan.write_stages[1].block_count,
+            BlockCount::new(0x710)
         );
     }
 }
