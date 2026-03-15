@@ -2055,6 +2055,12 @@ fn write_recover_summary(
     writeln!(stdout, "{detail}")
         .map_err(|source| stdout_io_error("writing the recovery summary outcome", &source))?;
 
+    writeln!(
+        stdout,
+        "   {EMOJI_HOURGLASS}Power-cycle the board to leave recovery mode (a reset alone is not sufficient)."
+    )
+    .map_err(|source| stdout_io_error("writing the power-cycle hint", &source))?;
+
     Ok(())
 }
 

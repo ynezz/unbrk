@@ -74,6 +74,9 @@ unbrk recover \
   --prompt-timeout 120
 ```
 
+After flashing completes, a full power cycle (not just a reset) is required
+to leave recovery mode and boot the new firmware.
+
 Machine-driven recovery that stops at U-Boot and emits newline-delimited JSON
 events instead of a live console:
 
@@ -134,6 +137,8 @@ just ci
   `AN7581>` as normal boot chatter, not as protocol failure.
 - If `prompt-timeout` expires before any prompt appears, restart from a clean
   power-off state and re-check the port, cabling, and recovery-mode timing.
+- After a successful recovery or flash, a full power cycle is required to exit
+  recovery mode. A reset alone is not sufficient.
 
 ## Exit Codes
 
