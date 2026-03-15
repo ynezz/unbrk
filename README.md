@@ -10,14 +10,20 @@ optionally, the follow-on U-Boot flash sequence.
 ## Support Status
 
 - Linux is hardware-validated on Nokia Valyrian as of 2026-03-14.
-- macOS and Windows are portability targets only until they each have their
-  own real-device validation evidence.
+- macOS (aarch64) is hardware-validated on Nokia Valyrian as of 2026-03-15.
+- Windows is a portability target only until it has its own real-device
+  validation evidence.
 
-The current macOS and Windows portability claims come from the
-`test (macos-latest)` and `test (windows-latest)` jobs in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml), which run the simulated
-clippy, nextest, and doc-test suite. They do not imply real-device UART
-recovery has been validated on either host yet.
+Both Linux and macOS validations were performed against the Nokia Valyrian
+(Airoha AN7581) using an FTDI FT232R USB UART adapter. The macOS validation
+covered RAM recovery, persistent NAND flashing (`--flash-persistent`),
+`--resume-from-uboot`, `--json` output, image verification, and all CLI
+subcommands (`doctor`, `ports`, `completions`, `man`).
+
+The current Windows portability claim comes from the `test (windows-latest)`
+job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which runs the
+simulated clippy, nextest, and doc-test suite. It does not imply real-device
+UART recovery has been validated on Windows yet.
 
 ## Installation
 
