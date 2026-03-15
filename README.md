@@ -176,6 +176,7 @@ The stable event kinds are:
 ## Reference Docs
 
 - `docs/an7581-uart-recovery-protocol.md`
-- `docs/hardware-validation-2026-03-14.md`
+- `docs/hardware-validation-2026-03-14.md` (Linux)
+- `docs/hardware-validation-2026-03-15.md` (macOS)
 - `docs/testing.md`
 - `tests/fixtures/an7581/README.md`

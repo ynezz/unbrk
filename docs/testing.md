@@ -18,22 +18,21 @@ cargo fmt --check
 
 ## Host Validation Matrix
 
-- Linux is the hardware-validation host. Real-device recovery and persistent
-  flash evidence live in `docs/hardware-validation-2026-03-14.md`.
-- macOS is a portability target. The CI workflow in
-  `.github/workflows/ci.yml` runs `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo nextest run --workspace`, and `cargo test --doc --workspace` on
-  `macos-latest`. The current commit `b2406d3` passed that job on
-  2026-03-14, but there is still no real-device macOS recovery evidence.
-- Windows is also a portability target. The same `ci` run for commit
-  `b2406d3` passed the `windows-latest` job on 2026-03-14 with the same
-  clippy, nextest, and doc-test coverage. Hardware validation still requires
-  separate real-device evidence before we can call Windows a validated
-  recovery host.
+- Linux is hardware-validated. Real-device recovery and persistent flash
+  evidence live in `docs/hardware-validation-2026-03-14.md`.
+- macOS (aarch64) is hardware-validated. Real-device recovery and persistent
+  flash evidence live in `docs/hardware-validation-2026-03-15.md`. Notable
+  platform difference: CRC readiness latency is ~8.5s per `loadx` on macOS
+  vs ~2s on Linux, adding ~13s to a full flash cycle. XMODEM transfer speed
+  and `mmc` operations are comparable. EOT quirk recovery was triggered on
+  macOS but not Linux, suggesting tighter USB serial timing on macOS.
+- Windows is a portability target. The CI workflow in
+  `.github/workflows/ci.yml` runs clippy, nextest, and doc-test on
+  `windows-latest`. Hardware validation still requires separate real-device
+  evidence before we can call Windows a validated recovery host.
 
-When working from a Linux-only workspace, do not claim local macOS validation.
-Use the CI matrix as portability evidence and keep real-device statements tied
-to captured host-specific recovery runs.
+Keep real-device validation statements tied to captured host-specific
+recovery runs with stored timing evidence.
 
 ## Transcript And Fixture Coverage
 
@@ -53,7 +52,7 @@ Those tests cover:
 
 ## Hardware Validation Procedure
 
-Use this flow for real-device Linux validation on Nokia Valyrian:
+Use this flow for real-device validation on Nokia Valyrian (Linux or macOS):
 
 1. Prepare the board powered off and connect the serial adapter.
 2. Start `unbrk recover` with explicit `--port`, `--preloader`, and `--fip`.
@@ -111,5 +110,7 @@ cargo run -p unbrk-cli -- recover \
 - Repeated manual resets after the command has started: treat the whole run as
   invalid and restart cleanly.
 
-The March 14, 2026 validation evidence and stored transcript paths live in
-`docs/hardware-validation-2026-03-14.md`.
+Validation evidence and stored transcript paths:
+
+- Linux (2026-03-14): `docs/hardware-validation-2026-03-14.md`
+- macOS (2026-03-15): `docs/hardware-validation-2026-03-15.md`
