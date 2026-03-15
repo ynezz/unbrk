@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "unbrk-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "unbrk-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "serde",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
