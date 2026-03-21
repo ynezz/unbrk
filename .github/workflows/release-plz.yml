@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
 
       - name: Install release-plz
-        uses: taiki-e/install-action@1dcbf2bdd1cc32135a68fdcd77374bd01e13abda # v2.68.28
+        uses: taiki-e/install-action@b988c18e3de947a10207d5289ed90fae4e2c51f1 # v2.69.5
         with:
           tool: release-plz
 
@@ -58,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Install release-plz
-        uses: taiki-e/install-action@1dcbf2bdd1cc32135a68fdcd77374bd01e13abda # v2.68.28
+        uses: taiki-e/install-action@b988c18e3de947a10207d5289ed90fae4e2c51f1 # v2.69.5
         with:
           tool: release-plz
 
