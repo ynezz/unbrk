@@ -53,7 +53,7 @@ jobs:
           dist plan --tag "${{ steps.tag.outputs.value }}" --output-format=json > dist-plan.json
 
       - name: Upload plan manifest
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: plan-manifest
           path: dist-plan.json
@@ -118,7 +118,7 @@ jobs:
           subject-path: ${{ steps.files.outputs.paths }}
 
       - name: Upload local artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-local-${{ matrix.target }}
           path: |
@@ -174,7 +174,7 @@ jobs:
           subject-path: ${{ steps.files.outputs.paths }}
 
       - name: Upload global artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-global
           path: ${{ steps.files.outputs.paths }}
